@@ -2,6 +2,11 @@
 
 gmux is a Go library for simultaneously serving net/http and gRPC requests on a single port.
 
+gmux is derived from [cmux](https://github.com/soheilhy/cmux), enabling mTLS at the expense of
+reduced flexibility. Whereas cmux operates at the transport layer and enables multiplexing
+arbitrary application layer protocols, gmux operates at the application layer (on top of HTTP
+with or without TLS), to enable better integration with net/http and crypto/tls.
+
 ## Example
 
 ```go
