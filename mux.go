@@ -30,7 +30,6 @@ import (
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
-	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -122,59 +121,48 @@ func (m *mux) handleH2(srv *http.Server, conn net.Conn, handler http.Handler) er
 	if err != nil {
 		return err
 	}
+	// Write frames from the server to a pipe so that we can de-duplicate the first
+	// SETTINGS ACK. The client's first SETTINGS is handled twice: once in getConnHandler,
+	// and once in the final connHandler. As getConnHandler will ACK the SETTINGS,
+	// we need to filter out the second one ade by the final connHandler.
+	rpipe, wpipe := io.Pipe()
+	go func() {
+		if err := copyFramesUntilSettingsAck(conn, rpipe); err != nil {
+			rpipe.CloseWithError(err)
+			return
+		}
+		_, err = io.Copy(conn, rpipe)
+		rpipe.CloseWithError(err)
+	}()
+	proxyConn, closed := newProxyConn(conn, io.MultiReader(&clientReadBuf, conn), wpipe)
+	err = connHandler(srv, proxyConn, closed, handler)
+	wpipe.CloseWithError(err)
+	return err
+}
 
-	// FIXME(axw) less arcane pipe r/w names
-	var g errgroup.Group
-	rp2s, wp2s := io.Pipe()
-	rs2p, ws2p := io.Pipe()
-	g.Go(func() (res error) { // read frames from conn, write to pipe
-		_, err := io.Copy(wp2s, &clientReadBuf)
+// copyFramesUntilSettingsAck copies http/2 frames from r to w
+// up until (but excluding) the first settings ACK frame.
+func copyFramesUntilSettingsAck(w io.Writer, r io.Reader) error {
+	var frameBuf bytes.Buffer
+	framer := http2.NewFramer(w, io.TeeReader(r, &frameBuf))
+	framer.SetReuseFrames()
+	var haveFirstSettingsACK bool
+	for !haveFirstSettingsACK {
+		f, err := framer.ReadFrame()
 		if err != nil {
-			wp2s.CloseWithError(err)
 			return err
 		}
-		_, err = io.Copy(wp2s, conn)
-		wp2s.CloseWithError(err)
-		return err
-	})
-	g.Go(func() (res error) { // read frames from pipe, write to conn
-		defer func() { rs2p.CloseWithError(res) }()
-		var framesBuf bytes.Buffer
-		framer := http2.NewFramer(conn, io.TeeReader(rs2p, &framesBuf))
-		framer.SetReuseFrames()
-		// Wait for the server to send an ACK to the client's SETTINGS,
-		// filtering it out and forwarding everything else.
-		var haveFirstSettingsACK bool
-		for !haveFirstSettingsACK {
-			f, err := framer.ReadFrame()
-			if err != nil {
-				return err
-			}
-			switch f := f.(type) {
-			case *http2.SettingsFrame:
-				if !haveFirstSettingsACK && f.IsAck() {
-					// Ignore first ACK, as the client's
-					// SETTINGS has already been ACKed.
-					haveFirstSettingsACK = true
-					framesBuf.Truncate(framesBuf.Len() - int(f.Length) - http2FrameHeaderLength)
-					break
-				}
+		switch f := f.(type) {
+		case *http2.SettingsFrame:
+			if !haveFirstSettingsACK && f.IsAck() {
+				haveFirstSettingsACK = true
+				frameBuf.Truncate(frameBuf.Len() - int(f.Length) - http2FrameHeaderLength)
+				break
 			}
 		}
-		if _, err := io.Copy(conn, &framesBuf); err != nil {
-			return err
-		}
-		_, err = io.Copy(conn, rs2p)
-		return err
-	})
-	g.Go(func() (res error) {
-		proxyConn, closed := newProxyConn(conn, rp2s, ws2p)
-		err := connHandler(srv, proxyConn, closed, handler)
-		ws2p.CloseWithError(err)
-		rp2s.CloseWithError(err)
-		return err
-	})
-	return g.Wait()
+	}
+	_, err := io.Copy(w, &frameBuf)
+	return err
 }
 
 // getConnHandler handles a new client connection, writing a SETTINGS
