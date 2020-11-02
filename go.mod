@@ -3,6 +3,7 @@ module github.com/elastic/gmux
 go 1.15
 
 require (
+	github.com/elastic/go-licenser v0.3.1
 	github.com/stretchr/testify v1.6.1
 	golang.org/x/net v0.0.0-20201010224723-4f7140c49acb
 	golang.org/x/sync v0.0.0-20201008141435-b3e1573b7520
