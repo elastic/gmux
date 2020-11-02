@@ -131,7 +131,7 @@ func (m *mux) handleH2(srv *http.Server, conn net.Conn, handler http.Handler) er
 			rpipe.CloseWithError(err)
 			return
 		}
-		_, err = io.Copy(conn, rpipe)
+		_, err := io.Copy(conn, rpipe)
 		rpipe.CloseWithError(err)
 	}()
 	proxyConn, closed := newProxyConn(conn, io.MultiReader(&clientReadBuf, conn), wpipe)
