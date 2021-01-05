@@ -49,20 +49,23 @@ pipeline {
         stages {
           stage('Test') {
             agent { label "${PLATFORM}" }
+            environment {
+              GOTESTSUM_JUNITFILE = "junit.xml"
+            }
             steps {
               withGithubNotify(context: "Test-${GO_VERSION}-${PLATFORM}") {
                 deleteDir()
                 unstash 'source'
                 withGoEnv(version: "${GO_VERSION}"){
                   dir("${BASE_DIR}"){
-                    cmd(label: "check for ${GO_VERSION} in ${PLATFORM}", script: 'GOTESTSUM_JUNITFILE=junit.xml make check')
+                    cmd(label: "check for ${GO_VERSION} in ${PLATFORM}", script: 'make check')
                   }
                 }
               }
             }
             post {
               always {
-                junit(allowEmptyResults: true, keepLongStdio: true, testResults: "${BASE_DIR}/junit.xml")
+                junit(allowEmptyResults: true, keepLongStdio: true, testResults: "${BASE_DIR}/${env.GOTESTSUM_JUNITFILE}")
               }
             }
           }
