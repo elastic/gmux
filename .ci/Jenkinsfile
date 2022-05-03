@@ -33,39 +33,20 @@ pipeline {
       }
     }
     stage('Test') {
-      failFast false
-      matrix {
-        options { skipDefaultCheckout() }
-        axes {
-          axis {
-            name 'GO_VERSION'
-            values '1.15.6'
-          }
-          axis {
-            name 'PLATFORM'
-            values 'ubuntu-18 && immutable', 'macosx && x86_64'
+      steps {
+        withGithubNotify(context: "Test") {
+          deleteDir()
+          unstash 'source'
+          withGoEnv(version: "${GO_VERSION}"){
+            dir("${BASE_DIR}"){
+              cmd(label: "check for ${GO_VERSION}", script: 'GOTESTSUM_JUNITFILE=junit.xml make check')
+            }
           }
         }
-        stages {
-          stage('Test') {
-            agent { label "${PLATFORM}" }
-            steps {
-              withGithubNotify(context: "Test-${GO_VERSION}-${PLATFORM}") {
-                deleteDir()
-                unstash 'source'
-                withGoEnv(version: "${GO_VERSION}"){
-                  dir("${BASE_DIR}"){
-                    cmd(label: "check for ${GO_VERSION} in ${PLATFORM}", script: 'GOTESTSUM_JUNITFILE=junit.xml make check')
-                  }
-                }
-              }
-            }
-            post {
-              always {
-                junit(allowEmptyResults: true, keepLongStdio: true, testResults: "${BASE_DIR}/junit.xml")
-              }
-            }
-          }
+      }
+      post {
+        always {
+          junit(allowEmptyResults: true, keepLongStdio: true, testResults: "${BASE_DIR}/junit.xml")
         }
       }
     }
