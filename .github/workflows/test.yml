@@ -23,7 +23,8 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
       - name: Check for ${{ matrix.go-version }}
-        env: GOTESTSUM_JUNITFILE=junit.xml
+        env:
+          GOTESTSUM_JUNITFILE: junit.xml
         run: make check
       - name: Publish Test Report
         uses: mikepenz/action-junit-report@v3
