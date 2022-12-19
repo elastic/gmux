@@ -4,9 +4,13 @@ name: test
 
 on:
   push:
-    branches: ['main']
+    branches:
+      - main
+    tags:
+      - v*.*.*
   pull_request:
-    branches: ['main']
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -15,8 +19,11 @@ jobs:
   test:
     strategy:
       matrix:
-        os: ['macos-latest',  'ubuntu-latest']
-        go-version: ['1.15.6']
+        os:
+          - macos-latest
+          - ubuntu-latest
+        go-version:
+          - '1.15.6'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
