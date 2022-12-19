@@ -8,9 +8,8 @@ on:
   pull_request:
     branches: [ "main" ]
 
-    #permissions:
-#  contents: read
-#  checks: write
+permissions:
+  contents: read
 
 jobs:
   test:
