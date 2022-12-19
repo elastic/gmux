@@ -17,7 +17,6 @@ jobs:
       matrix:
         os: ['macos-latest',  'ubuntu-latest']
         go-version: ['1.15.6']
-
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
