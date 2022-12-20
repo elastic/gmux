@@ -1,0 +1,41 @@
+---
+## Test with multiple operating systems
+name: test
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - v*.*.*
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os:
+          - macos-latest
+          - ubuntu-latest
+        go-version:
+          - '1.15.6'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v3
+        with:
+          go-version: ${{ matrix.go-version }}
+      - name: Check for ${{ matrix.go-version }}
+        env:
+          GOTESTSUM_JUNITFILE: ${{ matrix.os }}-${{ matrix.go-version }}-junit.xml
+        run: make check
+      - uses: actions/upload-artifact@v2  # upload test results
+        if: success() || failure() # run this step even if previous step failed
+        with:
+          name: test-results
+          path: '*-junit.xml'
