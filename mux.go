@@ -41,8 +41,8 @@ const (
 // mux supports multiplexing plain-old HTTP/2 and gRPC traffic
 // on a single listener.
 type mux struct {
-	http2Server *http2.Server
-	grpcConns   chan<- net.Conn
+	http2Server  *http2.Server
+	grpcListener *chanListener
 }
 
 // ConfigureServer configures srv to identify gRPC connections and send them
@@ -73,7 +73,7 @@ func ConfigureServer(srv *http.Server, conf *http2.Server) (grpcListener net.Lis
 		conf = new(http2.Server)
 	}
 	glis := newChanListener()
-	mux := &mux{http2Server: conf, grpcConns: glis.conns}
+	mux := &mux{http2Server: conf, grpcListener: glis}
 	srv.Handler = mux.withGRPCInsecure(srv.Handler)
 	srv.TLSNextProto[http2.NextProtoTLS] = func(srv *http.Server, conn *tls.Conn, h http.Handler) {
 		err := mux.handleH2(srv, conn, h)
@@ -298,7 +298,8 @@ func (m *mux) handleHTTP(srv *http.Server, conn net.Conn, closed <-chan struct{}
 
 func (m *mux) handleGRPC(_ *http.Server, conn net.Conn, closed <-chan struct{}, _ http.Handler) error {
 	select {
-	case m.grpcConns <- conn:
+	case <-m.grpcListener.closed:
+	case m.grpcListener.conns <- conn:
 	case <-closed:
 		// Connection closed before it could be handled.
 		return nil
