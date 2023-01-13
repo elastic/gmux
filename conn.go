@@ -101,10 +101,9 @@ func (l *chanListener) Accept() (net.Conn, error) {
 	select {
 	case <-l.closed:
 		return nil, errors.New("listener closed")
-	default:
+	case conn := <-l.conns:
+		return conn, nil
 	}
-	conn := <-l.conns
-	return conn, nil
 }
 
 type gmuxAddr struct{}

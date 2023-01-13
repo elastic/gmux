@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -299,6 +300,7 @@ func (m *mux) handleHTTP(srv *http.Server, conn net.Conn, closed <-chan struct{}
 func (m *mux) handleGRPC(_ *http.Server, conn net.Conn, closed <-chan struct{}, _ http.Handler) error {
 	select {
 	case <-m.grpcListener.closed:
+		return errors.New("grpc listener closed")
 	case m.grpcListener.conns <- conn:
 	case <-closed:
 		// Connection closed before it could be handled.
