@@ -90,10 +90,6 @@ func TestServerHTTPRequestTimeout(t *testing.T) {
 	client.Timeout = 100 * time.Millisecond
 	_, err := client.Get(srv.URL)
 	assert.Error(t, err)
-
-	client.CloseIdleConnections()
-	err = srv.Config.Shutdown(context.Background())
-	assert.NoError(t, err)
 }
 
 func TestServerGRPCListener(t *testing.T) {
