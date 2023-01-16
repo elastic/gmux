@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -75,7 +76,7 @@ func ConfigureServer(srv *http.Server, conf *http2.Server) (grpcListener net.Lis
 	}
 	glis := newChanListener()
 	mux := &mux{http2Server: conf, grpcListener: glis}
-	srv.Handler = mux.withGRPCInsecure(srv.Handler)
+	srv.Handler = mux.withGRPCInsecure(srv.Handler, srv.ErrorLog)
 	srv.TLSNextProto[http2.NextProtoTLS] = func(srv *http.Server, conn *tls.Conn, h http.Handler) {
 		err := mux.handleH2(srv, conn, h)
 		if err != nil && srv.ErrorLog != nil {
@@ -91,7 +92,7 @@ func ConfigureServer(srv *http.Server, conf *http2.Server) (grpcListener net.Lis
 // handled by next.
 //
 // See https://httpwg.org/specs/rfc7540.html#rfc.section.3.4
-func (m *mux) withGRPCInsecure(next http.Handler) http.Handler {
+func (m *mux) withGRPCInsecure(next http.Handler, errLog *log.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS == nil && r.Method == "PRI" && len(r.Header) == 0 && r.URL.Path == "*" && r.Proto == "HTTP/2.0" {
 			hijacker, ok := w.(http.Hijacker)
@@ -108,7 +109,10 @@ func (m *mux) withGRPCInsecure(next http.Handler) http.Handler {
 				preface := "PRI * HTTP/2.0\r\n\r\n"
 				r := io.MultiReader(strings.NewReader(preface), rw, conn)
 				pc, closed := newProxyConn(conn, r, conn)
-				m.handleGRPC(nil, pc, closed, nil)
+				err = m.handleGRPC(nil, pc, closed, nil)
+				if err != nil && errLog != nil {
+					errLog.Printf("h2c handleGRPC (%s) returned an error: %s", conn.RemoteAddr(), err)
+				}
 				return
 			}
 		}
