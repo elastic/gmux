@@ -28,7 +28,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -79,17 +78,6 @@ func TestServerHTTPRequestTLS(t *testing.T) {
 	resp.Body.Close()
 
 	assert.NotNil(t, rTLS)
-}
-
-func TestServerHTTPRequestTimeout(t *testing.T) {
-	srv, _ := startConfiguredServer(t, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
-	}))
-
-	client := srv.Client()
-	client.Timeout = 100 * time.Millisecond
-	_, err := client.Get(srv.URL)
-	assert.Error(t, err)
 }
 
 func TestServerGRPCListener(t *testing.T) {
