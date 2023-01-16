@@ -121,27 +121,31 @@ func TestShutdownHTTPAndGRPCServers(t *testing.T) {
 	assert.NotNil(t, grpcListener)
 
 	var g errgroup.Group
-	defer func() {
-		assert.EqualError(t, g.Wait(), grpc.ErrServerStopped.Error())
-	}()
 
 	grpcServer := grpc.NewServer()
 	pb.RegisterGreeterServer(grpcServer, &greeterServer{})
 	g.Go(func() error { return grpcServer.Serve(grpcListener) })
 
 	grpcClient := getGRPCClient(t, srv)
+	greeterClient := pb.NewGreeterClient(grpcClient)
+	_, err := greeterClient.SayHello(context.Background(), &pb.HelloRequest{Name: "world"})
+	assert.NoError(t, err)
+	assert.NoError(t, grpcClient.Close())
 
 	// Stop grpc server first.
 	grpcServer.GracefulStop()
 
-	greeterClient := pb.NewGreeterClient(grpcClient)
-	_, err := greeterClient.SayHello(context.Background(), &pb.HelloRequest{Name: "world"})
+	grpcClient = getGRPCClient(t, srv)
+	greeterClient = pb.NewGreeterClient(grpcClient)
+	_, err = greeterClient.SayHello(context.Background(), &pb.HelloRequest{Name: "world"})
 	assert.EqualError(t, err, "rpc error: code = Unavailable desc = error reading from server: EOF")
 	assert.NoError(t, grpcClient.Close())
 
 	// Then stop http server.
 	err = srv.Config.Shutdown(context.Background())
 	assert.NoError(t, err)
+
+	assert.NoError(t, g.Wait())
 }
 
 func TestGRPCInsecure(t *testing.T) {
