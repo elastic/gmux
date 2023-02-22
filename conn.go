@@ -93,7 +93,6 @@ func (l *chanListener) Addr() net.Addr {
 func (l *chanListener) Close() error {
 	l.closeOnce.Do(func() {
 		close(l.closed)
-		close(l.conns)
 	})
 	return nil
 }
