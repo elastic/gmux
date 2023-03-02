@@ -116,7 +116,10 @@ func TestShutdownListenerClosed(t *testing.T) {
 	assert.Nil(t, conn)
 }
 
-func TestShutdownHTTPAndGRPCServers(t *testing.T) {
+func TestShutdownGRPCServerBeforeHTTPServer(t *testing.T) {
+	// Although it is recommended to shutdown HTTP server before GRPC server,
+	// make sure it does not panic when they are closed in reversed order.
+
 	srv, grpcListener := startConfiguredServer(t, nil, nil)
 	assert.NotNil(t, grpcListener)
 
