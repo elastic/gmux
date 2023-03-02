@@ -97,12 +97,7 @@ func TestServerGRPCListener(t *testing.T) {
 	g.Go(func() error { return grpcServer.Serve(grpcListener) })
 	defer grpcServer.Stop()
 
-	srvURL, err := url.Parse(srv.URL)
-	require.NoError(t, err)
-
-	clientTLSConfig := srv.Client().Transport.(*http.Transport).TLSClientConfig
-	grpcClient, err := grpc.Dial(srvURL.Host, grpc.WithTransportCredentials(credentials.NewTLS(clientTLSConfig)))
-	require.NoError(t, err)
+	grpcClient := getGRPCClient(t, srv)
 	greeterClient := pb.NewGreeterClient(grpcClient)
 	reply, err := greeterClient.SayHello(context.Background(), &pb.HelloRequest{Name: "world"})
 	assert.NoError(t, err)
@@ -119,6 +114,41 @@ func TestShutdownListenerClosed(t *testing.T) {
 	conn, err := grpcListener.Accept()
 	assert.EqualError(t, err, "listener closed")
 	assert.Nil(t, conn)
+}
+
+func TestShutdownGRPCServerBeforeHTTPServer(t *testing.T) {
+	// Although it is recommended to shutdown HTTP server before GRPC server,
+	// make sure it does not panic when they are closed in reversed order.
+
+	srv, grpcListener := startConfiguredServer(t, nil, nil)
+	assert.NotNil(t, grpcListener)
+
+	var g errgroup.Group
+
+	grpcServer := grpc.NewServer()
+	pb.RegisterGreeterServer(grpcServer, &greeterServer{})
+	g.Go(func() error { return grpcServer.Serve(grpcListener) })
+
+	grpcClient := getGRPCClient(t, srv)
+	greeterClient := pb.NewGreeterClient(grpcClient)
+	_, err := greeterClient.SayHello(context.Background(), &pb.HelloRequest{Name: "world"})
+	assert.NoError(t, err)
+	assert.NoError(t, grpcClient.Close())
+
+	// Stop grpc server first.
+	grpcServer.GracefulStop()
+
+	grpcClient = getGRPCClient(t, srv)
+	greeterClient = pb.NewGreeterClient(grpcClient)
+	_, err = greeterClient.SayHello(context.Background(), &pb.HelloRequest{Name: "world"})
+	assert.EqualError(t, err, "rpc error: code = Unavailable desc = error reading from server: EOF")
+	assert.NoError(t, grpcClient.Close())
+
+	// Then stop http server.
+	err = srv.Config.Shutdown(context.Background())
+	assert.NoError(t, err)
+
+	assert.NoError(t, g.Wait())
 }
 
 func TestGRPCInsecure(t *testing.T) {
@@ -289,4 +319,14 @@ type greeterServer struct {
 
 func (s *greeterServer) SayHello(ctx context.Context, req *pb.HelloRequest) (*pb.HelloReply, error) {
 	return &pb.HelloReply{Message: fmt.Sprintf("Hello, %s!", req.Name)}, nil
+}
+
+func getGRPCClient(t *testing.T, srv *httptest.Server) *grpc.ClientConn {
+	srvURL, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+
+	clientTLSConfig := srv.Client().Transport.(*http.Transport).TLSClientConfig
+	grpcClient, err := grpc.Dial(srvURL.Host, grpc.WithTransportCredentials(credentials.NewTLS(clientTLSConfig)))
+	require.NoError(t, err)
+	return grpcClient
 }

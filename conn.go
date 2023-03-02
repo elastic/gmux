@@ -78,11 +78,12 @@ func (c *proxyConn) Write(b []byte) (int, error) {
 
 type chanListener struct {
 	closeOnce sync.Once
+	closed    chan struct{}
 	conns     chan net.Conn
 }
 
 func newChanListener() *chanListener {
-	return &chanListener{conns: make(chan net.Conn)}
+	return &chanListener{conns: make(chan net.Conn), closed: make(chan struct{})}
 }
 
 func (l *chanListener) Addr() net.Addr {
@@ -91,17 +92,18 @@ func (l *chanListener) Addr() net.Addr {
 
 func (l *chanListener) Close() error {
 	l.closeOnce.Do(func() {
-		close(l.conns)
+		close(l.closed)
 	})
 	return nil
 }
 
 func (l *chanListener) Accept() (net.Conn, error) {
-	conn, ok := <-l.conns
-	if !ok {
+	select {
+	case <-l.closed:
 		return nil, errors.New("listener closed")
+	case conn := <-l.conns:
+		return conn, nil
 	}
-	return conn, nil
 }
 
 type gmuxAddr struct{}
