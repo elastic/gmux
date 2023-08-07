@@ -15,7 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//+build tools
+//go:build tools
+// +build tools
 
 package gmux
 
