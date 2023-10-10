@@ -3,13 +3,13 @@ check: check-licenses check-fmt test
 
 .PHONY: check-licenses
 check-licenses:
-	go run github.com/elastic/go-licenser -d .
+	go run -modfile=tools/go.mod github.com/elastic/go-licenser -d .
 
 .PHONY: update-licenses
 update-licenses:
-	go run github.com/elastic/go-licenser .
+	go run -modfile=tools/go.mod github.com/elastic/go-licenser .
 
-_GOIMPORTS:=$(shell go run golang.org/x/tools/cmd/goimports -l .)
+_GOIMPORTS:=$(shell go run -modfile=tools/go.mod golang.org/x/tools/cmd/goimports -l .)
 
 .PHONY: check-fmt
 check-fmt:
@@ -17,8 +17,8 @@ check-fmt:
 
 .PHONY: fmt
 fmt:
-	go run golang.org/x/tools/cmd/goimports -w .
+	go run -modfile=tools/go.mod golang.org/x/tools/cmd/goimports -w .
 
 .PHONY: test
 test:
-	go run gotest.tools/gotestsum --format testname -- -race -v ./...
+	go run -modfile=tools/go.mod gotest.tools/gotestsum --format testname -- -race -v ./...
