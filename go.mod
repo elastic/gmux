@@ -1,6 +1,6 @@
 module github.com/elastic/gmux
 
-go 1.15
+go 1.20
 
 require (
 	github.com/elastic/go-licenser v0.3.1
