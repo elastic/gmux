@@ -23,7 +23,7 @@ jobs:
           - macos-latest
           - ubuntu-latest
         go-version:
-          - '1.15.6'
+          - 'stable'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
