@@ -15,11 +15,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//+build tools
+//go:build tools
+// +build tools
 
 package gmux
 
 import (
 	_ "github.com/elastic/go-licenser"
 	_ "golang.org/x/tools/cmd/goimports"
+	_ "gotest.tools/gotestsum"
 )
