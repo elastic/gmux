@@ -1,0 +1,33 @@
+version: 2
+updates:
+  # go dependencies
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    groups:
+      google.golang.org/grpc:
+        patterns:
+        - "google.golang.org/grpc*"
+      golang.org/x/:
+        patterns:
+        - "golang.org/x/*"
+  # go tools
+  - package-ecosystem: "gomod"
+    directory: "tools/"
+    schedule:
+      interval: "weekly"
+
+  # GitHub actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    reviewers:
+      - "elastic/observablt-ci"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "22:00"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
