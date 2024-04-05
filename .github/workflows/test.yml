@@ -26,15 +26,15 @@ jobs:
           - 'stable'
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-go@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go-version }}
       - name: Check for ${{ matrix.go-version }}
         env:
           GOTESTSUM_JUNITFILE: ${{ matrix.os }}-${{ matrix.go-version }}-junit.xml
         run: make check
-      - uses: actions/upload-artifact@v2  # upload test results
+      - uses: actions/upload-artifact@v4  # upload test results
         if: success() || failure() # run this step even if previous step failed
         with:
           name: test-results
