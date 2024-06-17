@@ -3,7 +3,7 @@ module github.com/elastic/gmux/tools
 go 1.20
 
 require (
-	github.com/elastic/go-licenser v0.4.1
+	github.com/elastic/go-licenser v0.4.2
 	golang.org/x/tools v0.22.0
 	gotest.tools/gotestsum v1.12.0
 )
