@@ -5,7 +5,7 @@ go 1.20
 require (
 	github.com/stretchr/testify v1.9.0
 	golang.org/x/net v0.27.0
-	golang.org/x/sync v0.7.0
+	golang.org/x/sync v0.8.0
 	google.golang.org/grpc v1.64.0
 	google.golang.org/grpc/examples v0.0.0-20231016154744-cb430bed4d27
 )
