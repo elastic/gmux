@@ -4,7 +4,7 @@ go 1.20
 
 require (
 	github.com/elastic/go-licenser v0.4.2
-	golang.org/x/tools v0.28.0
+	golang.org/x/tools v0.29.0
 	gotest.tools/gotestsum v1.12.0
 )
 
@@ -18,7 +18,7 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	golang.org/x/mod v0.22.0 // indirect
 	golang.org/x/sync v0.10.0 // indirect
-	golang.org/x/sys v0.28.0 // indirect
+	golang.org/x/sys v0.29.0 // indirect
 	golang.org/x/term v0.18.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 )
