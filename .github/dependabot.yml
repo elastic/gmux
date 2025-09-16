@@ -12,11 +12,6 @@ updates:
       golang.org/x/:
         patterns:
         - "golang.org/x/*"
-  # go tools
-  - package-ecosystem: "gomod"
-    directory: "tools/"
-    schedule:
-      interval: "weekly"
 
   # GitHub actions
   - package-ecosystem: "github-actions"
