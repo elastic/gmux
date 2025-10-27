@@ -34,7 +34,7 @@ jobs:
         env:
           GOTESTSUM_JUNITFILE: ${{ matrix.os }}-${{ matrix.go-version }}-junit.xml
         run: make check
-      - uses: actions/upload-artifact@v4  # upload test results
+      - uses: actions/upload-artifact@v5  # upload test results
         if: success() || failure() # run this step even if previous step failed
         with:
           name: test-results-${{ matrix.os }}-${{ matrix.go-version }}
