@@ -38,7 +38,13 @@ const (
 	http2FrameHeaderLength = 9
 
 	grpcContentType = "application/grpc"
+
+	// RFC 9218 SETTINGS_NO_RFC7540_PRIORITIES setting identifier.
+	// Defined here to keep compatibility with older x/net/http2 module versions.
+	noRFC7540PrioritiesSettingID http2.SettingID = 0x9
 )
+
+const sendNoRFC7540Priorities = true
 
 // mux supports multiplexing plain-old HTTP/2 and gRPC traffic
 // on a single listener.
@@ -182,12 +188,21 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 	framer := http2.NewFramer(conn, rbuf)
 	framer.SetReuseFrames()
 
-	// Client expects SETTINGS first, so send empty initial settings.
+	// Client expects SETTINGS first, so send initial settings.
+	//
+	// Keep SETTINGS_NO_RFC7540_PRIORITIES enabled by default. gmux writes this
+	// frame while sniffing, and the backend x/net/http2 server may later send
+	// the same setting. Sending it here avoids clients rejecting the sequence as
+	// an illegal setting value change.
 	// The real server will send a new one with the real settings.
 	//
 	// When replaying frames to the real server, we'll need to suppress
 	// the ACK for this frame, which the server won't know about.
-	if err := framer.WriteSettings(); err != nil {
+	var settings []http2.Setting
+	if sendNoRFC7540Priorities {
+		settings = append(settings, http2.Setting{ID: noRFC7540PrioritiesSettingID, Val: 1})
+	}
+	if err := framer.WriteSettings(settings...); err != nil {
 		return nil, err
 	}
 
