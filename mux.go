@@ -224,33 +224,54 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 // the initial SETTINGS values emitted by http2.Server.ServeConn.
 func backendInitialSettings(conf *http2.Server) []http2.Setting {
 	serverConn, clientConn := net.Pipe()
-	defer serverConn.Close()
-	defer clientConn.Close()
+
+	type probeResult struct {
+		settings []http2.Setting
+		err      error
+	}
+	resultCh := make(chan probeResult, 1)
 
 	go func() {
-		conf.ServeConn(serverConn, &http2.ServeConnOpts{
-			BaseConfig: &http.Server{},
-			Handler:    http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		defer clientConn.Close()
+
+		_ = clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		framer := http2.NewFramer(clientConn, clientConn)
+		frame, err := framer.ReadFrame()
+		if err != nil {
+			resultCh <- probeResult{err: err}
+			return
+		}
+		settingsFrame, ok := frame.(*http2.SettingsFrame)
+		if !ok {
+			resultCh <- probeResult{}
+			return
+		}
+
+		var settings []http2.Setting
+		_ = settingsFrame.ForeachSetting(func(s http2.Setting) error {
+			settings = append(settings, s)
+			return nil
 		})
+		resultCh <- probeResult{settings: settings}
 	}()
 
-	_ = clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	framer := http2.NewFramer(clientConn, clientConn)
-	frame, err := framer.ReadFrame()
-	if err != nil {
-		return nil
-	}
-	settingsFrame, ok := frame.(*http2.SettingsFrame)
-	if !ok {
-		return nil
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer func() {
+		cancel()
+		_ = serverConn.Close()
+	}()
 
-	var settings []http2.Setting
-	_ = settingsFrame.ForeachSetting(func(s http2.Setting) error {
-		settings = append(settings, s)
-		return nil
+	conf.ServeConn(serverConn, &http2.ServeConnOpts{
+		Context:    ctx,
+		BaseConfig: &http.Server{},
+		Handler:    http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
 	})
-	return settings
+
+	result := <-resultCh
+	if result.err != nil {
+		return nil
+	}
+	return result.settings
 }
 
 var decoderPool = sync.Pool{
