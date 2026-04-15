@@ -39,7 +39,8 @@ func TestGetConnHandlerWritesEmptyInitialSettings(t *testing.T) {
 }
 
 func TestBackendInitialSettingsIncludesNoRFC7540PrioritiesOnDefaultServer(t *testing.T) {
-	settings := backendInitialSettings(new(http2.Server))
+	settings, err := backendInitialSettings(new(http2.Server))
+	require.NoError(t, err)
 	require.NotEmpty(t, settings)
 
 	var found bool

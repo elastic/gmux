@@ -80,11 +80,15 @@ func ConfigureServer(srv *http.Server, conf *http2.Server) (grpcListener net.Lis
 	if conf == nil {
 		conf = new(http2.Server)
 	}
+	initialSettings, err := backendInitialSettings(conf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to probe backend initial HTTP/2 settings: %w", err)
+	}
 	glis := newChanListener()
 	mux := &mux{
 		http2Server:     conf,
 		grpcListener:    glis,
-		initialSettings: backendInitialSettings(conf),
+		initialSettings: initialSettings,
 	}
 	srv.Handler = mux.withGRPCInsecure(srv.Handler, srv.ErrorLog)
 	srv.TLSNextProto[http2.NextProtoTLS] = func(srv *http.Server, conn *tls.Conn, h http.Handler) {
@@ -226,7 +230,7 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 
 // backendInitialSettings probes backend http2 server configuration and returns
 // the initial SETTINGS values emitted by http2.Server.ServeConn.
-func backendInitialSettings(conf *http2.Server) []http2.Setting {
+func backendInitialSettings(conf *http2.Server) ([]http2.Setting, error) {
 	serverConn, clientConn := net.Pipe()
 	defer serverConn.Close()
 	defer clientConn.Close()
@@ -246,12 +250,13 @@ func backendInitialSettings(conf *http2.Server) []http2.Setting {
 		framer := http2.NewFramer(clientConn, clientConn)
 		frame, err := framer.ReadFrame()
 		if err != nil {
-			readErr = err
+			readErr = fmt.Errorf("reading initial settings frame: %w", err)
 			cancel()
 			return
 		}
 		settingsFrame, ok := frame.(*http2.SettingsFrame)
 		if !ok {
+			readErr = fmt.Errorf("unexpected first frame type %T", frame)
 			cancel()
 			return
 		}
@@ -271,9 +276,9 @@ func backendInitialSettings(conf *http2.Server) []http2.Setting {
 
 	<-readDone
 	if readErr != nil {
-		return nil
+		return nil, readErr
 	}
-	return settings
+	return settings, nil
 }
 
 var decoderPool = sync.Pool{
