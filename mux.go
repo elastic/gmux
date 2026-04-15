@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -44,21 +45,12 @@ const (
 	noRFC7540PrioritiesSettingID http2.SettingID = 0x9
 )
 
-const (
-	// Since golang.org/x/net/http2 v0.50.0, the backend server may advertise
-	// SETTINGS_NO_RFC7540_PRIORITIES=1 by default. gmux sends an initial SETTINGS
-	// frame while sniffing, so we include the same setting up front to keep the
-	// settings sequence stable for strict clients.
-	//
-	// See: https://github.com/golang/go/issues/77947
-	sendNoRFC7540Priorities = true
-)
-
 // mux supports multiplexing plain-old HTTP/2 and gRPC traffic
 // on a single listener.
 type mux struct {
-	http2Server  *http2.Server
-	grpcListener *chanListener
+	http2Server                *http2.Server
+	grpcListener               *chanListener
+	sendNoRFC7540Priorities    bool
 }
 
 // ConfigureServer configures srv to identify gRPC connections and send them
@@ -89,7 +81,11 @@ func ConfigureServer(srv *http.Server, conf *http2.Server) (grpcListener net.Lis
 		conf = new(http2.Server)
 	}
 	glis := newChanListener()
-	mux := &mux{http2Server: conf, grpcListener: glis}
+	mux := &mux{
+		http2Server:             conf,
+		grpcListener:            glis,
+		sendNoRFC7540Priorities: shouldSendNoRFC7540Priorities(conf),
+	}
 	srv.Handler = mux.withGRPCInsecure(srv.Handler, srv.ErrorLog)
 	srv.TLSNextProto[http2.NextProtoTLS] = func(srv *http.Server, conn *tls.Conn, h http.Handler) {
 		err := mux.handleH2(srv, conn, h)
@@ -198,18 +194,15 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 
 	// Client expects SETTINGS first, so send initial settings.
 	//
-	// Keep SETTINGS_NO_RFC7540_PRIORITIES enabled by default.
-	//
-	// With golang.org/x/net/http2 v0.50.0+, the backend server may later send
-	// this setting with value 1 by default. Sending it here avoids clients
-	// rejecting the sequence as an illegal setting value change.
+	// Mirror SETTINGS_NO_RFC7540_PRIORITIES if the backend http2.Server sends it
+	// by default, to keep the settings sequence stable for strict clients.
 	//
 	// See: https://github.com/golang/go/issues/77947
 	// The real server will send a new one with the real settings.
 	//
 	// When replaying frames to the real server, we'll need to suppress
 	// the ACK for this frame, which the server won't know about.
-	if sendNoRFC7540Priorities {
+	if m.sendNoRFC7540Priorities {
 		if err := framer.WriteSettings(http2.Setting{ID: noRFC7540PrioritiesSettingID, Val: 1}); err != nil {
 			return nil, err
 		}
@@ -235,6 +228,42 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 		connHandler = m.handleGRPC
 	}
 	return connHandler, nil
+}
+
+// shouldSendNoRFC7540Priorities probes the backend http2 server configuration
+// and returns whether it emits SETTINGS_NO_RFC7540_PRIORITIES=1 in its initial
+// SETTINGS frame.
+func shouldSendNoRFC7540Priorities(conf *http2.Server) bool {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	go func() {
+		conf.ServeConn(serverConn, &http2.ServeConnOpts{
+			BaseConfig: &http.Server{},
+			Handler:    http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		})
+	}()
+
+	_ = clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	framer := http2.NewFramer(clientConn, clientConn)
+	frame, err := framer.ReadFrame()
+	if err != nil {
+		return false
+	}
+	settingsFrame, ok := frame.(*http2.SettingsFrame)
+	if !ok {
+		return false
+	}
+
+	var send bool
+	_ = settingsFrame.ForeachSetting(func(s http2.Setting) error {
+		if s.ID == noRFC7540PrioritiesSettingID && s.Val == 1 {
+			send = true
+		}
+		return nil
+	})
+	return send
 }
 
 var decoderPool = sync.Pool{

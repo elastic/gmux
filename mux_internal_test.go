@@ -27,14 +27,38 @@ import (
 	"golang.org/x/net/http2"
 )
 
+func TestShouldSendNoRFC7540Priorities(t *testing.T) {
+	t.Run("default server config", func(t *testing.T) {
+		require.True(t, shouldSendNoRFC7540Priorities(new(http2.Server)))
+	})
+
+	t.Run("rfc7540 scheduler", func(t *testing.T) {
+		conf := &http2.Server{
+			NewWriteScheduler: func() http2.WriteScheduler {
+				return http2.NewPriorityWriteScheduler(nil)
+			},
+		}
+		require.False(t, shouldSendNoRFC7540Priorities(conf))
+	})
+}
+
 func TestGetConnHandlerWritesNoRFC7540PrioritiesSetting(t *testing.T) {
+	testGetConnHandlerWritesNoRFC7540PrioritiesSetting(t, true, true)
+}
+
+func TestGetConnHandlerOmitsNoRFC7540PrioritiesSetting(t *testing.T) {
+	testGetConnHandlerWritesNoRFC7540PrioritiesSetting(t, false, false)
+}
+
+func testGetConnHandlerWritesNoRFC7540PrioritiesSetting(t *testing.T, sendSetting bool, wantSetting bool) {
 	serverConn, clientConn := net.Pipe()
 	defer serverConn.Close()
 	defer clientConn.Close()
 
 	m := &mux{
-		http2Server:  new(http2.Server),
-		grpcListener: newChanListener(),
+		http2Server:             new(http2.Server),
+		grpcListener:            newChanListener(),
+		sendNoRFC7540Priorities: sendSetting,
 	}
 
 	done := make(chan error, 1)
@@ -57,7 +81,7 @@ func TestGetConnHandlerWritesNoRFC7540PrioritiesSetting(t *testing.T) {
 		}
 		return nil
 	})
-	require.True(t, haveNoRFC7540Priorities, "expected initial SETTINGS_NO_RFC7540_PRIORITIES=1")
+	require.Equal(t, wantSetting, haveNoRFC7540Priorities)
 
 	// The test scope ends at initial SETTINGS content; close peer side to unblock
 	// getConnHandler and avoid leaked goroutines.
