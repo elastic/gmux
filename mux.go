@@ -224,21 +224,21 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 // the initial SETTINGS values emitted by http2.Server.ServeConn.
 func backendInitialSettings(conf *http2.Server) []http2.Setting {
 	serverConn, clientConn := net.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		conf.ServeConn(serverConn, &http2.ServeConnOpts{
+			Context:    ctx,
 			BaseConfig: &http.Server{},
 			Handler:    http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
 		})
 		close(done)
 	}()
 	defer func() {
+		cancel()
 		_ = clientConn.Close()
 		_ = serverConn.Close()
-		select {
-		case <-done:
-		case <-time.After(100 * time.Millisecond):
-		}
+		<-done
 	}()
 
 	_ = clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
