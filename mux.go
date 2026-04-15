@@ -232,6 +232,14 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 // the initial SETTINGS values emitted by http2.Server.ServeConn.
 func backendInitialSettings(conf *http2.Server) (_ []http2.Setting, retErr error) {
 	serverConn, clientConn := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conf.ServeConn(serverConn, &http2.ServeConnOpts{
+			BaseConfig: &http.Server{},
+			Handler:    http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		})
+	}()
 	defer func() {
 		if err := serverConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) && retErr == nil {
 			retErr = fmt.Errorf("closing probe server pipe: %w", err)
@@ -239,60 +247,30 @@ func backendInitialSettings(conf *http2.Server) (_ []http2.Setting, retErr error
 		if err := clientConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) && retErr == nil {
 			retErr = fmt.Errorf("closing probe client pipe: %w", err)
 		}
+		<-done
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), backendInitialSettingsTimeout)
-	defer cancel()
-
-	type probeResult struct {
-		settings []http2.Setting
-		err      error
+	if err := clientConn.SetReadDeadline(time.Now().Add(backendInitialSettingsTimeout)); err != nil {
+		return nil, fmt.Errorf("setting probe read deadline: %w", err)
 	}
-	resultCh := make(chan probeResult, 1)
-
-	go func() {
-		defer cancel()
-		if err := clientConn.SetReadDeadline(time.Now().Add(backendInitialSettingsTimeout)); err != nil {
-			resultCh <- probeResult{err: fmt.Errorf("setting probe read deadline: %w", err)}
-			return
-		}
-
-		framer := http2.NewFramer(clientConn, clientConn)
-		frame, err := framer.ReadFrame()
-		if err != nil {
-			resultCh <- probeResult{err: fmt.Errorf("reading initial settings frame: %w", err)}
-			return
-		}
-
-		settingsFrame, ok := frame.(*http2.SettingsFrame)
-		if !ok {
-			resultCh <- probeResult{err: fmt.Errorf("unexpected first frame type %T", frame)}
-			return
-		}
-
-		var settings []http2.Setting
-		if err := settingsFrame.ForeachSetting(func(s http2.Setting) error {
-			settings = append(settings, s)
-			return nil
-		}); err != nil {
-			resultCh <- probeResult{err: fmt.Errorf("decoding initial settings: %w", err)}
-			return
-		}
-
-		resultCh <- probeResult{settings: settings}
-	}()
-
-	conf.ServeConn(serverConn, &http2.ServeConnOpts{
-		Context:    ctx,
-		BaseConfig: &http.Server{},
-		Handler:    http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
-	})
-
-	result := <-resultCh
-	if result.err != nil {
-		return nil, result.err
+	framer := http2.NewFramer(clientConn, clientConn)
+	frame, err := framer.ReadFrame()
+	if err != nil {
+		return nil, fmt.Errorf("reading initial settings frame: %w", err)
 	}
-	return result.settings, nil
+	settingsFrame, ok := frame.(*http2.SettingsFrame)
+	if !ok {
+		return nil, fmt.Errorf("unexpected first frame type %T", frame)
+	}
+
+	var settings []http2.Setting
+	if err := settingsFrame.ForeachSetting(func(s http2.Setting) error {
+		settings = append(settings, s)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("decoding initial settings: %w", err)
+	}
+	return settings, nil
 }
 
 var decoderPool = sync.Pool{
