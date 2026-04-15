@@ -39,6 +39,10 @@ const (
 	http2FrameHeaderLength = 9
 
 	grpcContentType = "application/grpc"
+
+	// backendInitialSettingsTimeout bounds the one-time startup probe that
+	// introspects the backend server's initial HTTP/2 SETTINGS frame.
+	backendInitialSettingsTimeout = 5 * time.Second
 )
 
 // mux supports multiplexing plain-old HTTP/2 and gRPC traffic
@@ -224,41 +228,39 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 // the initial SETTINGS values emitted by http2.Server.ServeConn.
 func backendInitialSettings(conf *http2.Server) []http2.Setting {
 	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
 
-	type probeResult struct {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var (
 		settings []http2.Setting
-		err      error
-	}
-	resultCh := make(chan probeResult, 1)
+		readErr  error
+	)
+	readDone := make(chan struct{})
 
 	go func() {
-		defer clientConn.Close()
-
-		_ = clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		defer close(readDone)
+		_ = clientConn.SetReadDeadline(time.Now().Add(backendInitialSettingsTimeout))
 		framer := http2.NewFramer(clientConn, clientConn)
 		frame, err := framer.ReadFrame()
 		if err != nil {
-			resultCh <- probeResult{err: err}
+			readErr = err
+			cancel()
 			return
 		}
 		settingsFrame, ok := frame.(*http2.SettingsFrame)
 		if !ok {
-			resultCh <- probeResult{}
+			cancel()
 			return
 		}
 
-		var settings []http2.Setting
 		_ = settingsFrame.ForeachSetting(func(s http2.Setting) error {
 			settings = append(settings, s)
 			return nil
 		})
-		resultCh <- probeResult{settings: settings}
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer func() {
 		cancel()
-		_ = serverConn.Close()
 	}()
 
 	conf.ServeConn(serverConn, &http2.ServeConnOpts{
@@ -267,11 +269,11 @@ func backendInitialSettings(conf *http2.Server) []http2.Setting {
 		Handler:    http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
 	})
 
-	result := <-resultCh
-	if result.err != nil {
+	<-readDone
+	if readErr != nil {
 		return nil
 	}
-	return result.settings
+	return settings
 }
 
 var decoderPool = sync.Pool{
