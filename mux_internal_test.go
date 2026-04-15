@@ -57,6 +57,10 @@ func TestGetConnHandlerMirrorsCustomBackendInitialSettings(t *testing.T) {
 		ID:  http2.SettingMaxConcurrentStreams,
 		Val: conf.MaxConcurrentStreams,
 	})
+	require.Contains(t, customSettings, http2.Setting{
+		ID:  http2.SettingMaxFrameSize,
+		Val: conf.MaxReadFrameSize,
+	})
 
 	testGetConnHandlerInitialSettings(t, customSettings)
 }
