@@ -231,10 +231,16 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 
 // backendInitialSettings probes backend http2 server configuration and returns
 // the initial SETTINGS values emitted by http2.Server.ServeConn.
-func backendInitialSettings(conf *http2.Server) ([]http2.Setting, error) {
+func backendInitialSettings(conf *http2.Server) (_ []http2.Setting, retErr error) {
 	serverConn, clientConn := net.Pipe()
-	defer serverConn.Close()
-	defer clientConn.Close()
+	defer func() {
+		if err := serverConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) && retErr == nil {
+			retErr = fmt.Errorf("closing probe server pipe: %w", err)
+		}
+		if err := clientConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) && retErr == nil {
+			retErr = fmt.Errorf("closing probe client pipe: %w", err)
+		}
+	}()
 
 	baseCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -244,7 +250,9 @@ func backendInitialSettings(conf *http2.Server) ([]http2.Setting, error) {
 
 	g.Go(func() error {
 		defer cancel()
-		_ = clientConn.SetReadDeadline(time.Now().Add(backendInitialSettingsTimeout))
+		if err := clientConn.SetReadDeadline(time.Now().Add(backendInitialSettingsTimeout)); err != nil {
+			return fmt.Errorf("setting probe read deadline: %w", err)
+		}
 		framer := http2.NewFramer(clientConn, clientConn)
 		frame, err := framer.ReadFrame()
 		if err != nil {
