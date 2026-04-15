@@ -249,8 +249,10 @@ func backendInitialSettings(conf *http2.Server) (_ []http2.Setting, retErr error
 		}
 		select {
 		case <-done:
-		case <-time.After(backendInitialSettingsTimeout):
-			retErr = fmt.Errorf("serve conn timeout")
+		case <-time.After(backendInitialSettingsTimeout): // Unexpected for conf.ServeConn to not return; fail fast
+			if retErr == nil {
+				retErr = fmt.Errorf("serve conn timeout")
+			}
 		}
 	}()
 
