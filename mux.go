@@ -33,7 +33,6 @@ import (
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
-	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -242,49 +241,58 @@ func backendInitialSettings(conf *http2.Server) (_ []http2.Setting, retErr error
 		}
 	}()
 
-	baseCtx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), backendInitialSettingsTimeout)
 	defer cancel()
 
-	var settings []http2.Setting
-	g, ctx := errgroup.WithContext(baseCtx)
+	type probeResult struct {
+		settings []http2.Setting
+		err      error
+	}
+	resultCh := make(chan probeResult, 1)
 
-	g.Go(func() error {
+	go func() {
 		defer cancel()
 		if err := clientConn.SetReadDeadline(time.Now().Add(backendInitialSettingsTimeout)); err != nil {
-			return fmt.Errorf("setting probe read deadline: %w", err)
+			resultCh <- probeResult{err: fmt.Errorf("setting probe read deadline: %w", err)}
+			return
 		}
+
 		framer := http2.NewFramer(clientConn, clientConn)
 		frame, err := framer.ReadFrame()
 		if err != nil {
-			return fmt.Errorf("reading initial settings frame: %w", err)
-		}
-		settingsFrame, ok := frame.(*http2.SettingsFrame)
-		if !ok {
-			return fmt.Errorf("unexpected first frame type %T", frame)
+			resultCh <- probeResult{err: fmt.Errorf("reading initial settings frame: %w", err)}
+			return
 		}
 
+		settingsFrame, ok := frame.(*http2.SettingsFrame)
+		if !ok {
+			resultCh <- probeResult{err: fmt.Errorf("unexpected first frame type %T", frame)}
+			return
+		}
+
+		var settings []http2.Setting
 		if err := settingsFrame.ForeachSetting(func(s http2.Setting) error {
 			settings = append(settings, s)
 			return nil
 		}); err != nil {
-			return fmt.Errorf("decoding initial settings: %w", err)
+			resultCh <- probeResult{err: fmt.Errorf("decoding initial settings: %w", err)}
+			return
 		}
-		return nil
+
+		resultCh <- probeResult{settings: settings}
+	}()
+
+	conf.ServeConn(serverConn, &http2.ServeConnOpts{
+		Context:    ctx,
+		BaseConfig: &http.Server{},
+		Handler:    http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
 	})
 
-	g.Go(func() error {
-		conf.ServeConn(serverConn, &http2.ServeConnOpts{
-			Context:    ctx,
-			BaseConfig: &http.Server{},
-			Handler:    http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
-		})
-		return nil
-	})
-
-	if err := g.Wait(); err != nil {
-		return nil, err
+	result := <-resultCh
+	if result.err != nil {
+		return nil, result.err
 	}
-	return settings, nil
+	return result.settings, nil
 }
 
 var decoderPool = sync.Pool{
