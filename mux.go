@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -43,8 +44,9 @@ const (
 // mux supports multiplexing plain-old HTTP/2 and gRPC traffic
 // on a single listener.
 type mux struct {
-	http2Server  *http2.Server
-	grpcListener *chanListener
+	http2Server      *http2.Server
+	grpcListener     *chanListener
+	initialSettings  []http2.Setting
 }
 
 // ConfigureServer configures srv to identify gRPC connections and send them
@@ -75,7 +77,11 @@ func ConfigureServer(srv *http.Server, conf *http2.Server) (grpcListener net.Lis
 		conf = new(http2.Server)
 	}
 	glis := newChanListener()
-	mux := &mux{http2Server: conf, grpcListener: glis}
+	mux := &mux{
+		http2Server:     conf,
+		grpcListener:    glis,
+		initialSettings: backendInitialSettings(conf),
+	}
 	srv.Handler = mux.withGRPCInsecure(srv.Handler, srv.ErrorLog)
 	srv.TLSNextProto[http2.NextProtoTLS] = func(srv *http.Server, conn *tls.Conn, h http.Handler) {
 		err := mux.handleH2(srv, conn, h)
@@ -182,12 +188,17 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 	framer := http2.NewFramer(conn, rbuf)
 	framer.SetReuseFrames()
 
-	// Client expects SETTINGS first, so send empty initial settings.
+	// Client expects SETTINGS first, so send initial settings.
+	//
+	// Mirror backend initial SETTINGS to keep gmux's sniffing SETTINGS consistent
+	// with what the backend http2.Server will advertise on the same connection.
+	//
+	// See: https://github.com/golang/go/issues/77947
 	// The real server will send a new one with the real settings.
 	//
 	// When replaying frames to the real server, we'll need to suppress
 	// the ACK for this frame, which the server won't know about.
-	if err := framer.WriteSettings(); err != nil {
+	if err := framer.WriteSettings(m.initialSettings...); err != nil {
 		return nil, err
 	}
 
@@ -207,6 +218,39 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 		connHandler = m.handleGRPC
 	}
 	return connHandler, nil
+}
+
+// backendInitialSettings probes backend http2 server configuration and returns
+// the initial SETTINGS values emitted by http2.Server.ServeConn.
+func backendInitialSettings(conf *http2.Server) []http2.Setting {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	go func() {
+		conf.ServeConn(serverConn, &http2.ServeConnOpts{
+			BaseConfig: &http.Server{},
+			Handler:    http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		})
+	}()
+
+	_ = clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	framer := http2.NewFramer(clientConn, clientConn)
+	frame, err := framer.ReadFrame()
+	if err != nil {
+		return nil
+	}
+	settingsFrame, ok := frame.(*http2.SettingsFrame)
+	if !ok {
+		return nil
+	}
+
+	var settings []http2.Setting
+	_ = settingsFrame.ForeachSetting(func(s http2.Setting) error {
+		settings = append(settings, s)
+		return nil
+	})
+	return settings
 }
 
 var decoderPool = sync.Pool{
