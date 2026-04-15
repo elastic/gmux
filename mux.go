@@ -48,9 +48,9 @@ const (
 // mux supports multiplexing plain-old HTTP/2 and gRPC traffic
 // on a single listener.
 type mux struct {
-	http2Server      *http2.Server
-	grpcListener     *chanListener
-	initialSettings  []http2.Setting
+	http2Server     *http2.Server
+	grpcListener    *chanListener
+	initialSettings []http2.Setting
 }
 
 // ConfigureServer configures srv to identify gRPC connections and send them
@@ -247,7 +247,11 @@ func backendInitialSettings(conf *http2.Server) (_ []http2.Setting, retErr error
 		if err := clientConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) && retErr == nil {
 			retErr = fmt.Errorf("closing probe client pipe: %w", err)
 		}
-		<-done
+		select {
+		case <-done:
+		case <-time.After(backendInitialSettingsTimeout):
+			retErr = fmt.Errorf("serve conn timeout")
+		}
 	}()
 
 	if err := clientConn.SetReadDeadline(time.Now().Add(backendInitialSettingsTimeout)); err != nil {
