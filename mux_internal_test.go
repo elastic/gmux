@@ -53,6 +53,25 @@ func TestBackendInitialSettingsIncludesNoRFC7540PrioritiesOnDefaultServer(t *tes
 	require.True(t, found, "expected backend initial SETTINGS to include NO_RFC7540_PRIORITIES=1")
 }
 
+func TestGetConnHandlerMirrorsCustomBackendInitialSettings(t *testing.T) {
+	defaultSettings, err := backendInitialSettings(new(http2.Server))
+	require.NoError(t, err)
+
+	conf := &http2.Server{
+		MaxConcurrentStreams: 7,
+		MaxReadFrameSize:     1 << 20,
+	}
+	customSettings, err := backendInitialSettings(conf)
+	require.NoError(t, err)
+	require.NotEqual(t, defaultSettings, customSettings, "custom server should emit different initial SETTINGS")
+	require.Contains(t, customSettings, http2.Setting{
+		ID:  http2.SettingMaxConcurrentStreams,
+		Val: conf.MaxConcurrentStreams,
+	})
+
+	testGetConnHandlerInitialSettings(t, customSettings)
+}
+
 func testGetConnHandlerInitialSettings(t *testing.T, initialSettings []http2.Setting) {
 	serverConn, clientConn := net.Pipe()
 	defer serverConn.Close()
