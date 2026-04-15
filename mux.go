@@ -209,12 +209,14 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 	//
 	// When replaying frames to the real server, we'll need to suppress
 	// the ACK for this frame, which the server won't know about.
-	var settings []http2.Setting
 	if sendNoRFC7540Priorities {
-		settings = append(settings, http2.Setting{ID: noRFC7540PrioritiesSettingID, Val: 1})
-	}
-	if err := framer.WriteSettings(settings...); err != nil {
-		return nil, err
+		if err := framer.WriteSettings(http2.Setting{ID: noRFC7540PrioritiesSettingID, Val: 1}); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := framer.WriteSettings(); err != nil {
+			return nil, err
+		}
 	}
 
 	// Read client preface. We don't bother verifying it here, as it will
