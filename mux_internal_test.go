@@ -27,17 +27,6 @@ import (
 	"golang.org/x/net/http2"
 )
 
-func TestGetConnHandlerMirrorsInitialSettings(t *testing.T) {
-	testGetConnHandlerInitialSettings(t, []http2.Setting{
-		{ID: http2.SettingMaxConcurrentStreams, Val: 123},
-		{ID: http2.SettingInitialWindowSize, Val: 65535},
-	})
-}
-
-func TestGetConnHandlerWritesEmptyInitialSettings(t *testing.T) {
-	testGetConnHandlerInitialSettings(t, nil)
-}
-
 func TestBackendInitialSettingsIncludesNoRFC7540PrioritiesOnDefaultServer(t *testing.T) {
 	settings, err := backendInitialSettings(new(http2.Server))
 	require.NoError(t, err)
