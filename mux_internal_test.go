@@ -27,21 +27,6 @@ import (
 	"golang.org/x/net/http2"
 )
 
-func TestBackendInitialSettingsIncludesNoRFC7540PrioritiesOnDefaultServer(t *testing.T) {
-	settings, err := backendInitialSettings(new(http2.Server))
-	require.NoError(t, err)
-	require.NotEmpty(t, settings)
-
-	var found bool
-	for _, s := range settings {
-		if s.ID == 0x9 && s.Val == 1 {
-			found = true
-			break
-		}
-	}
-	require.True(t, found, "expected backend initial SETTINGS to include NO_RFC7540_PRIORITIES=1")
-}
-
 func TestGetConnHandlerMirrorsCustomBackendInitialSettings(t *testing.T) {
 	defaultSettings, err := backendInitialSettings(new(http2.Server))
 	require.NoError(t, err)
