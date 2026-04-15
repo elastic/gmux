@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -38,27 +39,14 @@ const (
 	http2FrameHeaderLength = 9
 
 	grpcContentType = "application/grpc"
-
-	// RFC 9218 SETTINGS_NO_RFC7540_PRIORITIES setting identifier.
-	// Defined here to keep compatibility with older x/net/http2 module versions.
-	noRFC7540PrioritiesSettingID http2.SettingID = 0x9
-)
-
-const (
-	// Since golang.org/x/net/http2 v0.50.0, the backend server may advertise
-	// SETTINGS_NO_RFC7540_PRIORITIES=1 by default. gmux sends an initial SETTINGS
-	// frame while sniffing, so we include the same setting up front to keep the
-	// settings sequence stable for strict clients.
-	//
-	// See: https://github.com/golang/go/issues/77947
-	sendNoRFC7540Priorities = true
 )
 
 // mux supports multiplexing plain-old HTTP/2 and gRPC traffic
 // on a single listener.
 type mux struct {
-	http2Server  *http2.Server
-	grpcListener *chanListener
+	http2Server      *http2.Server
+	grpcListener     *chanListener
+	initialSettings  []http2.Setting
 }
 
 // ConfigureServer configures srv to identify gRPC connections and send them
@@ -89,7 +77,11 @@ func ConfigureServer(srv *http.Server, conf *http2.Server) (grpcListener net.Lis
 		conf = new(http2.Server)
 	}
 	glis := newChanListener()
-	mux := &mux{http2Server: conf, grpcListener: glis}
+	mux := &mux{
+		http2Server:     conf,
+		grpcListener:    glis,
+		initialSettings: backendInitialSettings(conf),
+	}
 	srv.Handler = mux.withGRPCInsecure(srv.Handler, srv.ErrorLog)
 	srv.TLSNextProto[http2.NextProtoTLS] = func(srv *http.Server, conn *tls.Conn, h http.Handler) {
 		err := mux.handleH2(srv, conn, h)
@@ -198,25 +190,16 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 
 	// Client expects SETTINGS first, so send initial settings.
 	//
-	// Keep SETTINGS_NO_RFC7540_PRIORITIES enabled by default.
-	//
-	// With golang.org/x/net/http2 v0.50.0+, the backend server may later send
-	// this setting with value 1 by default. Sending it here avoids clients
-	// rejecting the sequence as an illegal setting value change.
+	// Mirror backend initial SETTINGS to keep gmux's sniffing SETTINGS consistent
+	// with what the backend http2.Server will advertise on the same connection.
 	//
 	// See: https://github.com/golang/go/issues/77947
 	// The real server will send a new one with the real settings.
 	//
 	// When replaying frames to the real server, we'll need to suppress
 	// the ACK for this frame, which the server won't know about.
-	if sendNoRFC7540Priorities {
-		if err := framer.WriteSettings(http2.Setting{ID: noRFC7540PrioritiesSettingID, Val: 1}); err != nil {
-			return nil, err
-		}
-	} else {
-		if err := framer.WriteSettings(); err != nil {
-			return nil, err
-		}
+	if err := framer.WriteSettings(m.initialSettings...); err != nil {
+		return nil, err
 	}
 
 	// Read client preface. We don't bother verifying it here, as it will
@@ -235,6 +218,46 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 		connHandler = m.handleGRPC
 	}
 	return connHandler, nil
+}
+
+// backendInitialSettings probes backend http2 server configuration and returns
+// the initial SETTINGS values emitted by http2.Server.ServeConn.
+func backendInitialSettings(conf *http2.Server) []http2.Setting {
+	serverConn, clientConn := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		conf.ServeConn(serverConn, &http2.ServeConnOpts{
+			BaseConfig: &http.Server{},
+			Handler:    http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		})
+		close(done)
+	}()
+	defer func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+		select {
+		case <-done:
+		case <-time.After(100 * time.Millisecond):
+		}
+	}()
+
+	_ = clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	framer := http2.NewFramer(clientConn, clientConn)
+	frame, err := framer.ReadFrame()
+	if err != nil {
+		return nil
+	}
+	settingsFrame, ok := frame.(*http2.SettingsFrame)
+	if !ok {
+		return nil
+	}
+
+	var settings []http2.Setting
+	_ = settingsFrame.ForeachSetting(func(s http2.Setting) error {
+		settings = append(settings, s)
+		return nil
+	})
+	return settings
 }
 
 var decoderPool = sync.Pool{

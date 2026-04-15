@@ -27,14 +27,40 @@ import (
 	"golang.org/x/net/http2"
 )
 
-func TestGetConnHandlerWritesNoRFC7540PrioritiesSetting(t *testing.T) {
+func TestGetConnHandlerMirrorsInitialSettings(t *testing.T) {
+	testGetConnHandlerInitialSettings(t, []http2.Setting{
+		{ID: http2.SettingMaxConcurrentStreams, Val: 123},
+		{ID: http2.SettingInitialWindowSize, Val: 65535},
+	})
+}
+
+func TestGetConnHandlerWritesEmptyInitialSettings(t *testing.T) {
+	testGetConnHandlerInitialSettings(t, nil)
+}
+
+func TestBackendInitialSettingsIncludesNoRFC7540PrioritiesOnDefaultServer(t *testing.T) {
+	settings := backendInitialSettings(new(http2.Server))
+	require.NotEmpty(t, settings)
+
+	var found bool
+	for _, s := range settings {
+		if s.ID == 0x9 && s.Val == 1 {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "expected backend initial SETTINGS to include NO_RFC7540_PRIORITIES=1")
+}
+
+func testGetConnHandlerInitialSettings(t *testing.T, initialSettings []http2.Setting) {
 	serverConn, clientConn := net.Pipe()
 	defer serverConn.Close()
 	defer clientConn.Close()
 
 	m := &mux{
-		http2Server:  new(http2.Server),
-		grpcListener: newChanListener(),
+		http2Server:     new(http2.Server),
+		grpcListener:    newChanListener(),
+		initialSettings: append([]http2.Setting(nil), initialSettings...),
 	}
 
 	done := make(chan error, 1)
@@ -50,14 +76,12 @@ func TestGetConnHandlerWritesNoRFC7540PrioritiesSetting(t *testing.T) {
 	settingsFrame, ok := firstFrame.(*http2.SettingsFrame)
 	require.True(t, ok, "expected first frame to be SETTINGS")
 
-	var haveNoRFC7540Priorities bool
+	var gotSettings []http2.Setting
 	settingsFrame.ForeachSetting(func(s http2.Setting) error {
-		if s.ID == noRFC7540PrioritiesSettingID && s.Val == 1 {
-			haveNoRFC7540Priorities = true
-		}
+		gotSettings = append(gotSettings, s)
 		return nil
 	})
-	require.True(t, haveNoRFC7540Priorities, "expected initial SETTINGS_NO_RFC7540_PRIORITIES=1")
+	require.Equal(t, initialSettings, gotSettings)
 
 	// The test scope ends at initial SETTINGS content; close peer side to unblock
 	// getConnHandler and avoid leaked goroutines.
