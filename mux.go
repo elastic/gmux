@@ -33,6 +33,7 @@ import (
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -235,48 +236,45 @@ func backendInitialSettings(conf *http2.Server) ([]http2.Setting, error) {
 	defer serverConn.Close()
 	defer clientConn.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	baseCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var (
-		settings []http2.Setting
-		readErr  error
-	)
-	readDone := make(chan struct{})
+	var settings []http2.Setting
+	g, ctx := errgroup.WithContext(baseCtx)
 
-	go func() {
-		defer close(readDone)
+	g.Go(func() error {
+		defer cancel()
 		_ = clientConn.SetReadDeadline(time.Now().Add(backendInitialSettingsTimeout))
 		framer := http2.NewFramer(clientConn, clientConn)
 		frame, err := framer.ReadFrame()
 		if err != nil {
-			readErr = fmt.Errorf("reading initial settings frame: %w", err)
-			cancel()
-			return
+			return fmt.Errorf("reading initial settings frame: %w", err)
 		}
 		settingsFrame, ok := frame.(*http2.SettingsFrame)
 		if !ok {
-			readErr = fmt.Errorf("unexpected first frame type %T", frame)
-			cancel()
-			return
+			return fmt.Errorf("unexpected first frame type %T", frame)
 		}
 
-		_ = settingsFrame.ForeachSetting(func(s http2.Setting) error {
+		if err := settingsFrame.ForeachSetting(func(s http2.Setting) error {
 			settings = append(settings, s)
 			return nil
-		})
-		cancel()
-	}()
-
-	conf.ServeConn(serverConn, &http2.ServeConnOpts{
-		Context:    ctx,
-		BaseConfig: &http.Server{},
-		Handler:    http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		}); err != nil {
+			return fmt.Errorf("decoding initial settings: %w", err)
+		}
+		return nil
 	})
 
-	<-readDone
-	if readErr != nil {
-		return nil, readErr
+	g.Go(func() error {
+		conf.ServeConn(serverConn, &http2.ServeConnOpts{
+			Context:    ctx,
+			BaseConfig: &http.Server{},
+			Handler:    http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		})
+		return nil
+	})
+
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 	return settings, nil
 }
