@@ -44,7 +44,15 @@ const (
 	noRFC7540PrioritiesSettingID http2.SettingID = 0x9
 )
 
-const sendNoRFC7540Priorities = true
+const (
+	// Since golang.org/x/net/http2 v0.50.0, the backend server may advertise
+	// SETTINGS_NO_RFC7540_PRIORITIES=1 by default. gmux sends an initial SETTINGS
+	// frame while sniffing, so we include the same setting up front to keep the
+	// settings sequence stable for strict clients.
+	//
+	// See: https://github.com/golang/go/issues/77947
+	sendNoRFC7540Priorities = true
+)
 
 // mux supports multiplexing plain-old HTTP/2 and gRPC traffic
 // on a single listener.
@@ -190,10 +198,13 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 
 	// Client expects SETTINGS first, so send initial settings.
 	//
-	// Keep SETTINGS_NO_RFC7540_PRIORITIES enabled by default. gmux writes this
-	// frame while sniffing, and the backend x/net/http2 server may later send
-	// the same setting. Sending it here avoids clients rejecting the sequence as
-	// an illegal setting value change.
+	// Keep SETTINGS_NO_RFC7540_PRIORITIES enabled by default.
+	//
+	// With golang.org/x/net/http2 v0.50.0+, the backend server may later send
+	// this setting with value 1 by default. Sending it here avoids clients
+	// rejecting the sequence as an illegal setting value change.
+	//
+	// See: https://github.com/golang/go/issues/77947
 	// The real server will send a new one with the real settings.
 	//
 	// When replaying frames to the real server, we'll need to suppress
