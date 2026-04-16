@@ -233,6 +233,7 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 func backendInitialSettings(conf *http2.Server) (_ []http2.Setting, retErr error) {
 	serverConn, clientConn := net.Pipe()
 	done := make(chan struct{})
+	clientWriteDone := make(chan error, 1)
 	go func() {
 		defer close(done)
 		conf.ServeConn(serverConn, &http2.ServeConnOpts{
@@ -240,7 +241,27 @@ func backendInitialSettings(conf *http2.Server) (_ []http2.Setting, retErr error
 			Handler:    http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
 		})
 	}()
+	go func() {
+		// Complete enough of the client-side handshake so ServeConn does not
+		// emit a preface-read error during probe teardown.
+		if _, err := io.WriteString(clientConn, http2.ClientPreface); err != nil {
+			clientWriteDone <- err
+			return
+		}
+		writeFramer := http2.NewFramer(clientConn, nil)
+		clientWriteDone <- writeFramer.WriteSettings()
+	}()
 	defer func() {
+		select {
+		case err := <-clientWriteDone:
+			if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.ErrClosedPipe) && retErr == nil {
+				retErr = fmt.Errorf("writing probe client preface/settings: %w", err)
+			}
+		case <-time.After(backendInitialSettingsTimeout):
+			if retErr == nil {
+				retErr = fmt.Errorf("probe client write timeout")
+			}
+		}
 		if err := serverConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) && retErr == nil {
 			retErr = fmt.Errorf("closing probe server pipe: %w", err)
 		}
@@ -259,7 +280,7 @@ func backendInitialSettings(conf *http2.Server) (_ []http2.Setting, retErr error
 	if err := clientConn.SetReadDeadline(time.Now().Add(backendInitialSettingsTimeout)); err != nil {
 		return nil, fmt.Errorf("setting probe read deadline: %w", err)
 	}
-	framer := http2.NewFramer(clientConn, clientConn)
+	framer := http2.NewFramer(nil, clientConn)
 	frame, err := framer.ReadFrame()
 	if err != nil {
 		return nil, fmt.Errorf("reading initial settings frame: %w", err)
