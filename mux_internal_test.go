@@ -127,6 +127,15 @@ func TestHandleH2KeepsSettingsConsistentDuringRequest(t *testing.T) {
 	}
 }
 
+func BenchmarkBackendInitialSettings(b *testing.B) {
+	defaultConf := new(http2.Server)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, err := backendInitialSettings(defaultConf)
+		require.NoError(b, err)
+	}
+}
+
 func assertGetConnHandlerInitialSettings(t *testing.T, initialSettings []http2.Setting) {
 	serverConn, clientConn := net.Pipe()
 	defer serverConn.Close()
