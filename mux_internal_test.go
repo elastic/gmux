@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -201,16 +202,21 @@ func collectNonACKSettings(payload []byte) ([][]http2.Setting, error) {
 			return nil, err
 		}
 
-		settings, ok := frame.(*http2.SettingsFrame)
-		if !ok || settings.IsAck() {
+		switch frame := frame.(type) {
+		case *http2.SettingsFrame:
+			if frame.IsAck() {
+				continue
+			}
+			settingValues, err := settingsFromFrame(frame)
+			if err != nil {
+				return nil, err
+			}
+			settingsFrames = append(settingsFrames, settingValues)
+		case *http2.GoAwayFrame:
+			return nil, fmt.Errorf("unexpected GoAwayFrame")
+		default:
 			continue
 		}
-
-		settingValues, err := settingsFromFrame(settings)
-		if err != nil {
-			return nil, err
-		}
-		settingsFrames = append(settingsFrames, settingValues)
 	}
 }
 
