@@ -252,29 +252,30 @@ func backendInitialSettings(conf *http2.Server) (_ []http2.Setting, retErr error
 		clientWriteDone <- writeFramer.WriteSettings()
 	}()
 	defer func() {
+		var deferErr []error
 		// Teardown everything to ensure no goroutines are left behind
 		select {
 		case err := <-clientWriteDone:
-			if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.ErrClosedPipe) && retErr == nil {
-				retErr = fmt.Errorf("writing probe client preface/settings: %w", err)
+			if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.ErrClosedPipe) {
+				deferErr = append(deferErr, fmt.Errorf("writing probe client preface/settings: %w", err))
 			}
 		case <-time.After(backendInitialSettingsTimeout):
-			if retErr == nil {
-				retErr = fmt.Errorf("probe client write timeout")
-			}
+			deferErr = append(deferErr, fmt.Errorf("probe client write timeout"))
 		}
-		if err := serverConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) && retErr == nil {
-			retErr = fmt.Errorf("closing probe server pipe: %w", err)
+		if err := serverConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			deferErr = append(deferErr, fmt.Errorf("closing probe server pipe: %w", err))
 		}
-		if err := clientConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) && retErr == nil {
-			retErr = fmt.Errorf("closing probe client pipe: %w", err)
+		if err := clientConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			deferErr = append(deferErr, fmt.Errorf("closing probe client pipe: %w", err))
 		}
 		select {
 		case <-serverDone:
 		case <-time.After(backendInitialSettingsTimeout): // Unexpected for conf.ServeConn to not return; fail fast
-			if retErr == nil {
-				retErr = fmt.Errorf("serve conn timeout")
-			}
+			deferErr = append(deferErr, fmt.Errorf("serve conn timeout"))
+		}
+
+		if len(deferErr) > 0 {
+			retErr = errors.Join(append([]error{retErr}, deferErr...)...)
 		}
 	}()
 
