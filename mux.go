@@ -232,10 +232,10 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 // the initial SETTINGS values emitted by http2.Server.ServeConn.
 func backendInitialSettings(conf *http2.Server) (_ []http2.Setting, retErr error) {
 	serverConn, clientConn := net.Pipe()
-	done := make(chan struct{})
+	serverDone := make(chan struct{})
 	clientWriteDone := make(chan error, 1)
 	go func() {
-		defer close(done)
+		defer close(serverDone)
 		conf.ServeConn(serverConn, &http2.ServeConnOpts{
 			BaseConfig: &http.Server{},
 			Handler:    http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
@@ -252,6 +252,7 @@ func backendInitialSettings(conf *http2.Server) (_ []http2.Setting, retErr error
 		clientWriteDone <- writeFramer.WriteSettings()
 	}()
 	defer func() {
+		// Teardown everything to ensure no goroutines are left behind
 		select {
 		case err := <-clientWriteDone:
 			if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.ErrClosedPipe) && retErr == nil {
@@ -269,7 +270,7 @@ func backendInitialSettings(conf *http2.Server) (_ []http2.Setting, retErr error
 			retErr = fmt.Errorf("closing probe client pipe: %w", err)
 		}
 		select {
-		case <-done:
+		case <-serverDone:
 		case <-time.After(backendInitialSettingsTimeout): // Unexpected for conf.ServeConn to not return; fail fast
 			if retErr == nil {
 				retErr = fmt.Errorf("serve conn timeout")
