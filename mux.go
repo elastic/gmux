@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -38,13 +39,18 @@ const (
 	http2FrameHeaderLength = 9
 
 	grpcContentType = "application/grpc"
+
+	// backendInitialSettingsTimeout bounds the one-time startup probe that
+	// introspects the backend server's initial HTTP/2 SETTINGS frame.
+	backendInitialSettingsTimeout = 5 * time.Second
 )
 
 // mux supports multiplexing plain-old HTTP/2 and gRPC traffic
 // on a single listener.
 type mux struct {
-	http2Server  *http2.Server
-	grpcListener *chanListener
+	http2Server     *http2.Server
+	grpcListener    *chanListener
+	initialSettings []http2.Setting
 }
 
 // ConfigureServer configures srv to identify gRPC connections and send them
@@ -74,8 +80,16 @@ func ConfigureServer(srv *http.Server, conf *http2.Server) (grpcListener net.Lis
 	if conf == nil {
 		conf = new(http2.Server)
 	}
+	initialSettings, err := backendInitialSettings(conf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to probe backend initial HTTP/2 settings: %w", err)
+	}
 	glis := newChanListener()
-	mux := &mux{http2Server: conf, grpcListener: glis}
+	mux := &mux{
+		http2Server:     conf,
+		grpcListener:    glis,
+		initialSettings: initialSettings,
+	}
 	srv.Handler = mux.withGRPCInsecure(srv.Handler, srv.ErrorLog)
 	srv.TLSNextProto[http2.NextProtoTLS] = func(srv *http.Server, conn *tls.Conn, h http.Handler) {
 		err := mux.handleH2(srv, conn, h)
@@ -182,12 +196,17 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 	framer := http2.NewFramer(conn, rbuf)
 	framer.SetReuseFrames()
 
-	// Client expects SETTINGS first, so send empty initial settings.
+	// Client expects SETTINGS first, so send initial settings.
+	//
+	// Mirror backend initial SETTINGS to keep gmux's sniffing SETTINGS consistent
+	// with what the backend http2.Server will advertise on the same connection.
+	//
+	// See: https://github.com/golang/go/issues/77947
 	// The real server will send a new one with the real settings.
 	//
 	// When replaying frames to the real server, we'll need to suppress
 	// the ACK for this frame, which the server won't know about.
-	if err := framer.WriteSettings(); err != nil {
+	if err := framer.WriteSettings(m.initialSettings...); err != nil {
 		return nil, err
 	}
 
@@ -207,6 +226,80 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 		connHandler = m.handleGRPC
 	}
 	return connHandler, nil
+}
+
+// backendInitialSettings probes backend http2 server configuration and returns
+// the initial SETTINGS values emitted by http2.Server.ServeConn.
+func backendInitialSettings(conf *http2.Server) (_ []http2.Setting, retErr error) {
+	serverConn, clientConn := net.Pipe()
+	serverDone := make(chan struct{})
+	clientWriteDone := make(chan error, 1)
+	go func() {
+		defer close(serverDone)
+		conf.ServeConn(serverConn, &http2.ServeConnOpts{
+			BaseConfig: &http.Server{},
+			Handler:    http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		})
+	}()
+	go func() {
+		// Complete enough of the client-side handshake so ServeConn does not
+		// emit a preface-read error during probe teardown.
+		if _, err := io.WriteString(clientConn, http2.ClientPreface); err != nil {
+			clientWriteDone <- err
+			return
+		}
+		writeFramer := http2.NewFramer(clientConn, nil)
+		clientWriteDone <- writeFramer.WriteSettings()
+	}()
+	defer func() {
+		var deferErrs []error
+		// Teardown everything to ensure no goroutines are left behind
+		select {
+		case err := <-clientWriteDone:
+			if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.ErrClosedPipe) {
+				deferErrs = append(deferErrs, fmt.Errorf("writing probe client preface/settings: %w", err))
+			}
+		case <-time.After(backendInitialSettingsTimeout):
+			deferErrs = append(deferErrs, fmt.Errorf("probe client write timeout"))
+		}
+		if err := serverConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			deferErrs = append(deferErrs, fmt.Errorf("closing probe server pipe: %w", err))
+		}
+		if err := clientConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			deferErrs = append(deferErrs, fmt.Errorf("closing probe client pipe: %w", err))
+		}
+		select {
+		case <-serverDone:
+		case <-time.After(backendInitialSettingsTimeout): // Unexpected for conf.ServeConn to not return; fail fast
+			deferErrs = append(deferErrs, fmt.Errorf("serve conn timeout"))
+		}
+
+		if len(deferErrs) > 0 {
+			retErr = errors.Join(append([]error{retErr}, deferErrs...)...)
+		}
+	}()
+
+	if err := clientConn.SetReadDeadline(time.Now().Add(backendInitialSettingsTimeout)); err != nil {
+		return nil, fmt.Errorf("setting probe read deadline: %w", err)
+	}
+	framer := http2.NewFramer(nil, clientConn)
+	frame, err := framer.ReadFrame()
+	if err != nil {
+		return nil, fmt.Errorf("reading initial settings frame: %w", err)
+	}
+	settingsFrame, ok := frame.(*http2.SettingsFrame)
+	if !ok {
+		return nil, fmt.Errorf("unexpected first frame type %T", frame)
+	}
+
+	var settings []http2.Setting
+	if err := settingsFrame.ForeachSetting(func(s http2.Setting) error {
+		settings = append(settings, s)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("decoding initial settings: %w", err)
+	}
+	return settings, nil
 }
 
 var decoderPool = sync.Pool{
