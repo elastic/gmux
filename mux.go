@@ -48,56 +48,61 @@ const (
 // mux supports multiplexing plain-old HTTP/2 and gRPC traffic
 // on a single listener.
 type mux struct {
-	http2Server     *http2.Server
+	backend         *httpBackend
 	grpcListener    *chanListener
 	initialSettings []http2.Setting
 }
 
-// ConfigureServer configures srv to identify gRPC connections and send them
-// to the returned net.Listener, suitable for passing to grpc.Server.Serve,
-// while all other HTTP requests will be handled by srv.
+// Configure configures srv to identify gRPC connections and send them to the
+// returned net.Listener, suitable for passing to grpc.Server.Serve, while all
+// other HTTP requests will be handled by srv.
 //
-// ConfigureServer works with or without TLS enabled.
-//
-// When TLS is enabled, ConfigureServer relies on ALPN. ConfigureServer
-// internally calls http2.ConfigureServer(srv, conf) to configure HTTP/2 support,
-// and defines an alternative srv.TLSNextProto "h2" handler. When using TLS, the
-// gRPC listener returns secure connections; the gRPC server must not also be
+// When TLS is enabled, Configure relies on ALPN: it adds "h2" to
+// srv.TLSConfig.NextProtos and installs an srv.TLSNextProto "h2" handler,
+// which inspects each HTTP/2 connection to decide where to send it. The gRPC
+// listener returns secure connections, so the gRPC server must not also be
 // configured to wrap the connection with TLS.
 //
-// When TLS is not enabled, ConfigureServer relies on h2c prior knowledge,
-// wrapping srv.Handler. It is therefore necessary to set srv.Handler before
-// calling ConfigureServer.
+// HTTP/2 settings for connections handled by srv are taken from srv.HTTP2.
+//
+// When TLS is not enabled, Configure relies on h2c prior knowledge, wrapping
+// srv.Handler. It is therefore necessary to set srv.Handler before calling
+// Configure.
 //
 // The returned listener will be closed when srv.Shutdown is called. The
 // returned listener's Addr() method does not correspond to the configured
 // HTTP server's listener(s) in any way, and cannot be relied upon for forming
 // a connection URL.
-func ConfigureServer(srv *http.Server, conf *http2.Server) (grpcListener net.Listener, _ error) {
-	if err := http2.ConfigureServer(srv, conf); err != nil {
+func Configure(srv *http.Server) (grpcListener net.Listener, _ error) {
+	backend, err := newHTTPBackend(srv)
+	if err != nil {
 		return nil, err
 	}
-	if conf == nil {
-		conf = new(http2.Server)
-	}
-	initialSettings, err := backendInitialSettings(conf)
+	initialSettings, err := backendInitialSettings(backend.probeServe)
 	if err != nil {
+		backend.shutdown()
 		return nil, fmt.Errorf("failed to probe backend initial HTTP/2 settings: %w", err)
 	}
 	glis := newChanListener()
 	mux := &mux{
-		http2Server:     conf,
+		backend:         backend,
 		grpcListener:    glis,
 		initialSettings: initialSettings,
 	}
 	srv.Handler = mux.withGRPCInsecure(srv.Handler, srv.ErrorLog)
+	if srv.TLSNextProto == nil {
+		srv.TLSNextProto = make(map[string]func(*http.Server, *tls.Conn, http.Handler))
+	}
 	srv.TLSNextProto[http2.NextProtoTLS] = func(srv *http.Server, conn *tls.Conn, h http.Handler) {
-		err := mux.handleH2(srv, conn, h)
+		err := mux.handleH2(conn, h)
 		if err != nil && srv.ErrorLog != nil {
 			srv.ErrorLog.Printf("handleH2 (%s) returned an error: %s", conn.RemoteAddr(), err)
 		}
 	}
-	srv.RegisterOnShutdown(func() { glis.Close() })
+	srv.RegisterOnShutdown(func() {
+		glis.Close()
+		backend.shutdown()
+	})
 	return glis, nil
 }
 
@@ -123,7 +128,7 @@ func (m *mux) withGRPCInsecure(next http.Handler, errLog *log.Logger) http.Handl
 				preface := "PRI * HTTP/2.0\r\n\r\n"
 				r := io.MultiReader(strings.NewReader(preface), rw, conn)
 				pc, closed := newProxyConn(conn, r, conn)
-				err = m.handleGRPC(nil, pc, closed, nil)
+				err = m.handleGRPC(pc, closed, nil)
 				if err != nil && errLog != nil {
 					errLog.Printf("h2c handleGRPC (%s) returned an error: %s", conn.RemoteAddr(), err)
 				}
@@ -134,7 +139,7 @@ func (m *mux) withGRPCInsecure(next http.Handler, errLog *log.Logger) http.Handl
 	})
 }
 
-func (m *mux) handleH2(srv *http.Server, conn net.Conn, handler http.Handler) error {
+func (m *mux) handleH2(conn net.Conn, handler http.Handler) error {
 	var clientReadBuf bytes.Buffer
 	connHandler, err := m.getConnHandler(conn, &clientReadBuf)
 	if err != nil {
@@ -154,7 +159,7 @@ func (m *mux) handleH2(srv *http.Server, conn net.Conn, handler http.Handler) er
 		rpipe.CloseWithError(err)
 	}()
 	proxyConn, closed := newProxyConn(conn, io.MultiReader(&clientReadBuf, conn), wpipe)
-	err = connHandler(srv, proxyConn, closed, handler)
+	err = connHandler(proxyConn, closed, handler)
 	wpipe.CloseWithError(err)
 	return err
 }
@@ -199,7 +204,7 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 	// Client expects SETTINGS first, so send initial settings.
 	//
 	// Mirror backend initial SETTINGS to keep gmux's sniffing SETTINGS consistent
-	// with what the backend http2.Server will advertise on the same connection.
+	// with what the backend HTTP/2 server will advertise on the same connection.
 	//
 	// See: https://github.com/golang/go/issues/77947
 	// The real server will send a new one with the real settings.
@@ -211,7 +216,7 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 	}
 
 	// Read client preface. We don't bother verifying it here, as it will
-	// be verified later by the real http2.Server.
+	// be verified later by the real HTTP/2 server.
 	var preface [len(http2.ClientPreface)]byte
 	if _, err := io.ReadFull(rbuf, preface[:]); err != nil {
 		return nil, err
@@ -228,21 +233,18 @@ func (m *mux) getConnHandler(conn net.Conn, buf *bytes.Buffer) (connHandlerFunc,
 	return connHandler, nil
 }
 
-// backendInitialSettings probes backend http2 server configuration and returns
-// the initial SETTINGS values emitted by http2.Server.ServeConn.
-func backendInitialSettings(conf *http2.Server) (_ []http2.Setting, retErr error) {
+// backendInitialSettings probes the backend HTTP/2 server configuration and
+// returns the initial SETTINGS values it emits on a new connection.
+func backendInitialSettings(serve func(net.Conn)) (_ []http2.Setting, retErr error) {
 	serverConn, clientConn := net.Pipe()
 	serverDone := make(chan struct{})
 	clientWriteDone := make(chan error, 1)
 	go func() {
 		defer close(serverDone)
-		conf.ServeConn(serverConn, &http2.ServeConnOpts{
-			BaseConfig: &http.Server{},
-			Handler:    http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
-		})
+		serve(serverConn)
 	}()
 	go func() {
-		// Complete enough of the client-side handshake so ServeConn does not
+		// Complete enough of the client-side handshake so the server does not
 		// emit a preface-read error during probe teardown.
 		if _, err := io.WriteString(clientConn, http2.ClientPreface); err != nil {
 			clientWriteDone <- err
@@ -270,7 +272,7 @@ func backendInitialSettings(conf *http2.Server) (_ []http2.Setting, retErr error
 		}
 		select {
 		case <-serverDone:
-		case <-time.After(backendInitialSettingsTimeout): // Unexpected for conf.ServeConn to not return; fail fast
+		case <-time.After(backendInitialSettingsTimeout):
 			deferErrs = append(deferErrs, fmt.Errorf("serve conn timeout"))
 		}
 
@@ -371,11 +373,9 @@ func (m *mux) getContentType(framer *http2.Framer, framesBuf *bytes.Buffer) (con
 	return contentType, nil
 }
 
-type connHandlerFunc func(srv *http.Server, conn net.Conn, closed <-chan struct{}, handler http.Handler) error
+type connHandlerFunc func(conn net.Conn, closed <-chan struct{}, handler http.Handler) error
 
-func (m *mux) handleHTTP(srv *http.Server, conn net.Conn, closed <-chan struct{}, handler http.Handler) error {
-	// This code is adapted from x/net/http2 to not assume tls.Conn.
-
+func (m *mux) handleHTTP(conn net.Conn, closed <-chan struct{}, handler http.Handler) error {
 	// The TLSNextProto interface predates contexts, so the net/http package passes
 	// down its per-connection base context via an exported but unadvertised method
 	// on the Handler. This is for internal net/http<=>http2 use only.
@@ -386,15 +386,11 @@ func (m *mux) handleHTTP(srv *http.Server, conn net.Conn, closed <-chan struct{}
 	if bc, ok := handler.(baseContexter); ok {
 		ctx = bc.BaseContext()
 	}
-	m.http2Server.ServeConn(conn, &http2.ServeConnOpts{
-		Context:    ctx,
-		Handler:    handler,
-		BaseConfig: srv,
-	})
+	m.backend.serveConn(ctx, conn, closed)
 	return nil
 }
 
-func (m *mux) handleGRPC(_ *http.Server, conn net.Conn, closed <-chan struct{}, _ http.Handler) error {
+func (m *mux) handleGRPC(conn net.Conn, closed <-chan struct{}, _ http.Handler) error {
 	select {
 	case <-m.grpcListener.closed:
 		return errors.New("grpc listener closed")

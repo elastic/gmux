@@ -36,43 +36,56 @@ import (
 )
 
 func TestGetConnHandlerUsesBackendInitialSettings(t *testing.T) {
-	defaultSettings, err := backendInitialSettings(new(http2.Server))
-	require.NoError(t, err)
+	defaultSettings := probeInitialSettings(t, &http.Server{})
 
-	conf := &http2.Server{
+	conf := &http.HTTP2Config{
 		MaxConcurrentStreams: 7,
 		MaxReadFrameSize:     1 << 20,
 	}
-	customSettings, err := backendInitialSettings(conf)
-	require.NoError(t, err)
+	customSettings := probeInitialSettings(t, &http.Server{HTTP2: conf})
 	require.NotEmpty(t, customSettings)
 	require.NotEqual(t, defaultSettings, customSettings, "custom server should emit different initial SETTINGS")
 	require.Contains(t, customSettings, http2.Setting{
 		ID:  http2.SettingMaxConcurrentStreams,
-		Val: conf.MaxConcurrentStreams,
+		Val: uint32(conf.MaxConcurrentStreams),
 	})
 	require.Contains(t, customSettings, http2.Setting{
 		ID:  http2.SettingMaxFrameSize,
-		Val: conf.MaxReadFrameSize,
+		Val: uint32(conf.MaxReadFrameSize),
 	})
 
 	assertGetConnHandlerInitialSettings(t, customSettings)
 }
 
+// probeInitialSettings configures a backend for srv, and returns the initial
+// SETTINGS it emits on a new connection.
+func probeInitialSettings(t testing.TB, srv *http.Server) []http2.Setting {
+	t.Helper()
+	backend, err := newHTTPBackend(srv)
+	require.NoError(t, err)
+	t.Cleanup(backend.shutdown)
+	settings, err := backendInitialSettings(backend.probeServe)
+	require.NoError(t, err)
+	return settings
+}
+
+// TestHandleH2KeepsSettingsConsistentDuringRequest checks that the SETTINGS
+// frame gmux sends while sniffing a connection is identical to the one the
+// backend HTTP/2 server sends afterwards.
 func TestHandleH2KeepsSettingsConsistentDuringRequest(t *testing.T) {
-	conf := &http2.Server{
+	conf := &http.HTTP2Config{
 		MaxConcurrentStreams: 7,
 		MaxReadFrameSize:     1 << 20,
 	}
-	initialSettings, err := backendInitialSettings(conf)
-	require.NoError(t, err)
+	initialSettings := probeInitialSettings(t, &http.Server{HTTP2: conf})
 	require.NotEmpty(t, initialSettings)
 
 	testServer := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "text/plain")
 		_, _ = io.WriteString(w, "ok")
 	}))
-	_, err = ConfigureServer(testServer.Config, conf)
+	testServer.Config.HTTP2 = conf
+	_, err := Configure(testServer.Config)
 	require.NoError(t, err)
 	testServer.EnableHTTP2 = true
 	testServer.StartTLS()
@@ -83,14 +96,11 @@ func TestHandleH2KeepsSettingsConsistentDuringRequest(t *testing.T) {
 	baseTLS.NextProtos = []string{http2.NextProtoTLS}
 
 	recordedConnCh := make(chan *recordingConn, 1)
-	clientTransport := &http2.Transport{
-		TLSClientConfig: baseTLS,
-		DialTLSContext: func(_ context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-			dialTLS := cfg
-			if dialTLS == nil {
-				dialTLS = baseTLS.Clone()
-			}
-			conn, err := tls.Dial(network, addr, dialTLS)
+	clientTransport := &http.Transport{
+		ForceAttemptHTTP2: true,
+		TLSClientConfig:   baseTLS,
+		DialTLSContext: func(_ context.Context, network, addr string) (net.Conn, error) {
+			conn, err := tls.Dial(network, addr, baseTLS)
 			if err != nil {
 				return nil, err
 			}
@@ -110,6 +120,7 @@ func TestHandleH2KeepsSettingsConsistentDuringRequest(t *testing.T) {
 	clientTransport.CloseIdleConnections()
 
 	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, 2, resp.ProtoMajor, "expected request to be served over HTTP/2")
 	require.Equal(t, "ok", string(body))
 
 	var recordedConn *recordingConn
@@ -128,10 +139,12 @@ func TestHandleH2KeepsSettingsConsistentDuringRequest(t *testing.T) {
 }
 
 func BenchmarkBackendInitialSettings(b *testing.B) {
-	defaultConf := new(http2.Server)
+	backend, err := newHTTPBackend(&http.Server{})
+	require.NoError(b, err)
+	b.Cleanup(backend.shutdown)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_, err := backendInitialSettings(defaultConf)
+		_, err := backendInitialSettings(backend.probeServe)
 		require.NoError(b, err)
 	}
 }
@@ -142,7 +155,6 @@ func assertGetConnHandlerInitialSettings(t *testing.T, initialSettings []http2.S
 	defer clientConn.Close()
 
 	m := &mux{
-		http2Server:     new(http2.Server),
 		grpcListener:    newChanListener(),
 		initialSettings: append([]http2.Setting(nil), initialSettings...),
 	}
@@ -176,10 +188,17 @@ func assertGetConnHandlerInitialSettings(t *testing.T, initialSettings []http2.S
 	}
 }
 
+// recordingConn wraps a *tls.Conn, recording everything read from it.
 type recordingConn struct {
 	net.Conn
 	mu  sync.Mutex
 	buf bytes.Buffer
+}
+
+// ConnectionState exposes the TLS state so that http.Transport negotiates
+// HTTP/2 on the wrapped connection.
+func (c *recordingConn) ConnectionState() tls.ConnectionState {
+	return c.Conn.(*tls.Conn).ConnectionState()
 }
 
 func (c *recordingConn) Read(p []byte) (int, error) {

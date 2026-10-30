@@ -22,16 +22,15 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/net/http2"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -44,7 +43,7 @@ func TestServerHTTPRequest(t *testing.T) {
 	test := func(t *testing.T, forceAttemptHTTP2 bool, expectedProtoMajor int) {
 		var protoMajor int
 		var handledHTTP bool
-		srv, _ := startConfiguredServer(t, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv, _ := startConfiguredServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			protoMajor = r.ProtoMajor
 			handledHTTP = true
 		}))
@@ -55,7 +54,7 @@ func TestServerHTTPRequest(t *testing.T) {
 
 		resp, err := client.Get(srv.URL)
 		require.NoError(t, err)
-		io.Copy(ioutil.Discard, resp.Body)
+		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 
 		assert.True(t, handledHTTP)
@@ -67,14 +66,14 @@ func TestServerHTTPRequest(t *testing.T) {
 
 func TestServerHTTPRequestTLS(t *testing.T) {
 	var rTLS *tls.ConnectionState
-	srv, _ := startConfiguredServer(t, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv, _ := startConfiguredServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rTLS = r.TLS
 	}))
 
 	client := srv.Client()
 	resp, err := client.Get(srv.URL)
 	require.NoError(t, err)
-	io.Copy(ioutil.Discard, resp.Body)
+	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
 	assert.NotNil(t, rTLS)
@@ -82,7 +81,7 @@ func TestServerHTTPRequestTLS(t *testing.T) {
 
 func TestServerGRPCListener(t *testing.T) {
 	var handledHTTP bool
-	srv, grpcListener := startConfiguredServer(t, nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv, grpcListener := startConfiguredServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handledHTTP = true
 	}))
 	assert.NotNil(t, grpcListener)
@@ -108,7 +107,7 @@ func TestServerGRPCListener(t *testing.T) {
 }
 
 func TestShutdownListenerClosed(t *testing.T) {
-	srv, grpcListener := startConfiguredServer(t, nil, nil)
+	srv, grpcListener := startConfiguredServer(t, nil)
 
 	srv.Config.Shutdown(context.Background())
 	conn, err := grpcListener.Accept()
@@ -120,7 +119,7 @@ func TestShutdownGRPCServerBeforeHTTPServer(t *testing.T) {
 	// Although it is recommended to shutdown HTTP server before GRPC server,
 	// make sure it does not panic when they are closed in reversed order.
 
-	srv, grpcListener := startConfiguredServer(t, nil, nil)
+	srv, grpcListener := startConfiguredServer(t, nil)
 	assert.NotNil(t, grpcListener)
 
 	var g errgroup.Group
@@ -151,12 +150,76 @@ func TestShutdownGRPCServerBeforeHTTPServer(t *testing.T) {
 	assert.NoError(t, g.Wait())
 }
 
+func TestShutdownGracefulHTTP2(t *testing.T) {
+	// Shutdown of the HTTP server must send GOAWAY to HTTP/2 connections
+	// handled by gmux, and wait for in-flight requests to complete.
+	started := make(chan struct{})
+	release := make(chan struct{})
+	srv, _ := startConfiguredServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+		io.WriteString(w, "done")
+	}))
+
+	type result struct {
+		resp *http.Response
+		body string
+		err  error
+	}
+	results := make(chan result, 1)
+	go func() {
+		resp, err := srv.Client().Get(srv.URL)
+		if err != nil {
+			results <- result{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		results <- result{resp: resp, body: string(body), err: err}
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for request to start")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- srv.Config.Shutdown(ctx) }()
+
+	// Shutdown must not complete while the request is in flight.
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("Shutdown returned (%v) before in-flight request completed", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case res := <-results:
+		require.NoError(t, res.err)
+		assert.Equal(t, http.StatusOK, res.resp.StatusCode)
+		assert.Equal(t, 2, res.resp.ProtoMajor, "expected request to be served over HTTP/2")
+		assert.Equal(t, "done", res.body)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for response")
+	}
+	select {
+	case err := <-shutdownDone:
+		assert.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for Shutdown")
+	}
+}
+
 func TestGRPCInsecure(t *testing.T) {
 	var handledHTTP bool
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handledHTTP = true
 	})
-	srv, grpcListener := newConfiguredServer(t, nil, handler)
+	srv, grpcListener := newConfiguredServer(t, handler)
 	srv.EnableHTTP2 = false
 	srv.Start()
 
@@ -182,13 +245,13 @@ func TestGRPCInsecure(t *testing.T) {
 	// Non-gRPC requests go through to the configured net/http.Handler.
 	resp, err := srv.Client().Get(srv.URL)
 	require.NoError(t, err)
-	io.Copy(ioutil.Discard, resp.Body)
+	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	require.True(t, handledHTTP)
 }
 
 func BenchmarkGRPCWithTLS(b *testing.B) {
-	srv, muxedGRPCListener := startConfiguredServer(b, nil, nil)
+	srv, muxedGRPCListener := startConfiguredServer(b, nil)
 	directGRPCListener, err := tls.Listen("tcp", "localhost:0", srv.TLS)
 	require.NoError(b, err)
 	defer directGRPCListener.Close()
@@ -217,7 +280,7 @@ func BenchmarkGRPCWithTLS(b *testing.B) {
 }
 
 func BenchmarkGRPCInsecure(b *testing.B) {
-	srv, muxedGRPCListener := newConfiguredServer(b, nil, nil)
+	srv, muxedGRPCListener := newConfiguredServer(b, nil)
 	srv.EnableHTTP2 = false
 	srv.Start()
 
@@ -294,17 +357,17 @@ func benchmarkGRPC(b *testing.B, dial dialFunc, directListener, muxedListener ne
 
 type dialFunc func(b *testing.B, lis net.Listener, opts ...grpc.DialOption) *grpc.ClientConn
 
-func startConfiguredServer(t testing.TB, conf *http2.Server, handler http.Handler) (srv *httptest.Server, grpcListener net.Listener) {
+func startConfiguredServer(t testing.TB, handler http.Handler) (srv *httptest.Server, grpcListener net.Listener) {
 	t.Helper()
-	srv, grpcListener = newConfiguredServer(t, conf, handler)
+	srv, grpcListener = newConfiguredServer(t, handler)
 	srv.StartTLS()
 	return srv, grpcListener
 }
 
-func newConfiguredServer(t testing.TB, conf *http2.Server, handler http.Handler) (srv *httptest.Server, grpcListener net.Listener) {
+func newConfiguredServer(t testing.TB, handler http.Handler) (srv *httptest.Server, grpcListener net.Listener) {
 	t.Helper()
 	srv = httptest.NewUnstartedServer(handler)
-	grpcListener, err := gmux.ConfigureServer(srv.Config, conf)
+	grpcListener, err := gmux.Configure(srv.Config)
 	if err != nil {
 		t.Fatal(err)
 	}
